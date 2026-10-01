@@ -1,2 +1,6 @@
 .DS_Store
 *.exe
+nimcache/
+tests/t_*
+!tests/t_*.nim
+.env
