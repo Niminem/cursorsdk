@@ -16,7 +16,7 @@
 ## await tools.start()
 ## let client = newClient()
 ## await client.attachToolCallbacks(tools)
-## var opts = AgentOptions(model: model("composer-2"))
+## var opts = AgentOptions(model: model("composer-2.5"))
 ## opts.useTools(tools)
 ## let agent = await client.createAgent(opts)
 ## ```

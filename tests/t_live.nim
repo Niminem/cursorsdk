@@ -2,11 +2,11 @@
 ## available via `CURSOR_API_KEY` or a `.env` file in the repository root
 ## (`CURSOR_API_KEY=...`). These spend real requests.
 ##
-## Set `CURSOR_TEST_MODEL` to override the model (default: `composer-2`,
+## Set `CURSOR_TEST_MODEL` to override the model (default: `composer-2.5`,
 ## falling back to the first model from `ListModels`). Set
 ## `CURSOR_TEST_VERBOSE=1` to print every stream event.
 
-import std/[unittest, asyncdispatch, json, options, strutils, os, sets]
+import std/[unittest, asyncdispatch, json, options, strutils, os, sets, tables]
 import cursor
 
 proc loadApiKey(): string =
@@ -47,7 +47,7 @@ else:
         let models = await client.listModels()
         check models.len > 0
         if modelId.len == 0:
-          modelId = "composer-2"
+          modelId = "composer-2.5"
           var found = false
           for m in models:
             if m.id == modelId: found = true
@@ -132,7 +132,7 @@ else:
         check res.runId.len > 0
       waitFor run()
 
-    test "custom tool round trip":
+    test "custom tool round trip (with a >15 s tool pause)":
       proc run() {.async.} =
         let tools = newCallbackServer()
         var calls = 0
@@ -142,6 +142,10 @@ else:
           proc(args: JsonNode, ctx: ToolContext): Future[JsonNode] {.async.} =
             inc calls
             if verbose: stderr.writeLine("[tool] called with " & $args & " ctx=" & $ctx)
+            # The bridge emits keepalive frames after ~15 s of idle time;
+            # holding the tool past that verifies they are skipped and the
+            # live stream survives the pause.
+            await sleepAsync(16_000)
             result = %*{"value": 4242})
         await client.attachToolCallbacks(tools)
         defer: tools.stop()
@@ -157,12 +161,97 @@ else:
           if verbose: stderr.writeLine("[event] " & $ev.get.raw)
           if ev.get.kind == rekMessage and ev.get.msgType == "tool_call": sawToolCall = true
         let res = await run.wait()
-        echo "  tool calls: ", calls, " text: ", res.text.strip()
+        echo "  tool calls: ", calls, " keepalives: ", run.keepalives, " text: ", res.text.strip()
         check res.status == rlsFinished
         check calls >= 1
         check sawToolCall
+        check run.keepalives >= 1      # the pause really crossed the keepalive interval
         check "4242" in res.text
         await toolAgent.delete()
+      waitFor run()
+
+    test "custom store round trip":
+      # A second bridge whose local agent store is this process: an
+      # in-memory store following the structural rules in
+      # vendor/sdk-bridge/docs/services.md (wrapped inputs, bare outputs,
+      # `{found, data}` for checkpoint reads, base64 blobs).
+      proc run() {.async.} =
+        var records = initTable[string, JsonNode]()   # "<substore>/<id>" -> record
+        var blobs = initTable[string, string]()
+        var events: seq[JsonNode]
+        var seen = initHashSet[string]()
+        let store = newCallbackServer()
+        store.setStoreHandler(proc(substore, meth: string, input: JsonNode): Future[JsonNode] {.async.} =
+          seen.incl substore & "." & meth
+          case substore
+          of "agents", "runs":
+            let idKey = if substore == "agents": "agentId" else: "runId"
+            let recKey = if substore == "agents": "agent" else: "run"
+            case meth
+            of "create", "update":
+              let rec = input[recKey]
+              records[substore & "/" & rec[idKey].getStr] = rec
+              return rec
+            of "get":
+              return records.getOrDefault(substore & "/" & input[idKey].getStr)
+            of "delete":
+              records.del(substore & "/" & input[idKey].getStr)
+              return nil
+            of "list":
+              var items = newJArray()
+              for k, r in records:
+                if k.startsWith(substore & "/"): items.add r
+              return %*{"items": items}
+            else: discard
+          of "runEvents":
+            if meth == "append":
+              events.add input
+              return %*{"offset": $events.len}
+            elif meth == "list":
+              var items = newJArray()
+              for e in events:
+                if e["runId"] == input["runId"]: items.add e
+              return %*{"events": items}
+          of "checkpoints":
+            let k = input["agentId"].getStr & "/" & input["blobId"].getStr
+            case meth
+            of "create", "update":
+              blobs[k] = input["data"].getStr
+              return %*{"ok": true}
+            of "get":
+              return if k in blobs: %*{"found": true, "data": blobs[k]} else: %*{"found": false}
+            of "delete":
+              blobs.del(k)
+              return nil
+            else: discard
+          else: discard
+          raise newException(ValueError, "unhandled store call " & substore & "." & meth))
+        await store.start()
+        defer: store.stop()
+        var so = initClientOptions()
+        so.apiKey = apiKey
+        so.workspace = workspace / "custom-store"
+        createDir(so.workspace)
+        so.localStore = some(LocalAgentStoreConfig(kind: "custom"))
+        so.storeCallbackUrl = store.url
+        so.storeCallbackToken = store.authToken
+        let storeClient = newClient(so)
+        try:
+          let a = await storeClient.createAgent(modelId)
+          check "agents.create" in seen
+          let res = await (await a.send("Reply with exactly the word PONG and nothing else.")).wait()
+          echo "  store calls: ", seen
+          check res.status == rlsFinished
+          check "runs.create" in seen
+          check "runEvents.append" in seen
+          check "checkpoints.create" in seen
+          check "checkpoints.get" in seen
+          let info = await a.info()               # served from our store
+          check info.agentId == a.id
+          check (await storeClient.listAgents()).items.len == 1
+          await a.close()
+        finally:
+          await storeClient.close()
       waitFor run()
 
     test "cancel an in-flight run":
@@ -180,8 +269,28 @@ else:
 
     test "prompt one-shot":
       proc run() {.async.} =
-        let text = await client.prompt("Reply with exactly the word DONE and nothing else.", modelId)
-        check "DONE" in text.toUpperAscii
+        let res = await client.prompt("Reply with exactly the word DONE and nothing else.", modelId)
+        check res.status == rlsFinished
+        check res.runId.len > 0
+        check "DONE" in res.text.toUpperAscii
+      waitFor run()
+
+    test "delete(force) on an agent that never ran a turn":
+      # On this bridge release CreateAgent leaves a non-terminal run attached
+      # to a fresh agent, so a plain delete fails (see README, "Notes on this
+      # bridge release"). `force` cancels it first. If upstream changes this,
+      # the plain delete may start succeeding; the forced path must keep
+      # working either way.
+      proc run() {.async.} =
+        let fresh = await client.createAgent(modelId)
+        try:
+          await fresh.delete()
+          echo "  plain delete succeeded (bridge no longer pre-creates a run?)"
+        except RpcError as e:
+          echo "  plain delete failed as documented: ", e.msg.splitLines[0]
+          await fresh.delete(force = true)
+        expect RpcError:
+          discard await client.getAgent(fresh.id)
       waitFor run()
 
     test "agent lifecycle: info, close, archive, delete":

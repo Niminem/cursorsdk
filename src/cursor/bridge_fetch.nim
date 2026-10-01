@@ -14,6 +14,8 @@
 ## Compile with `-d:ssl` to download with `std/httpclient` instead.
 
 import std/[os, strutils, osproc, json]
+when defined(ssl):
+  import std/httpclient
 import version, sha256, errors
 
 const
@@ -24,7 +26,11 @@ proc bridgeExeName*(): string =
   when defined(windows): "cursor-sdk-bridge.exe" else: "cursor-sdk-bridge"
 
 proc platformSlug*(): tuple[os, arch: string] =
-  ## Release asset naming: os `linux|darwin|win32`, arch `x64|arm64`.
+  ## Release asset naming: os `linux|darwin|win32`, arch `x64|arm64`
+  ## (`win32` is `x64` only).
+  when defined(windows) and defined(arm64):
+    raise (ref BridgeError)(msg: "no prebuilt cursor-sdk-bridge for Windows ARM" &
+                                 "; set " & BridgeBinEnv & " to a bridge executable")
   let osName =
     when defined(macosx): "darwin"
     elif defined(linux): "linux"
@@ -64,7 +70,6 @@ proc runTool(cmd: string, args: seq[string]): tuple[output: string, code: int] =
 
 proc downloadFile(url, dest: string) =
   when defined(ssl):
-    import std/httpclient
     let client = newHttpClient(timeout = 120_000)
     defer: client.close()
     try:

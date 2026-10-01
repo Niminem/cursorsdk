@@ -28,6 +28,7 @@ type
     status*: RunLifecycleStatus
     errorCode*: Option[string]
     lastStatusMessage*: string
+    keepalives*: int                 ## empty envelopes skipped by `next`
     stream: ConnectStream
     fromObserve: bool
     finished: bool
@@ -75,7 +76,8 @@ proc track(r: Run, ev: RunEvent) =
 
 proc next*(r: Run): Future[Option[RunEvent]] {.async.} =
   ## Returns the next event, or `none` when the stream has ended.
-  ## Keepalives and unknown envelope cases are skipped. Raises
+  ## Keepalives (counted in `keepalives`) and unknown envelope cases are
+  ## skipped. Raises
   ## `TransportError` if the connection drops (the run keeps executing;
   ## use `observe` or `wait`) and `RpcError` if the bridge fails the stream.
   while not r.finished:
@@ -89,7 +91,9 @@ proc next*(r: Run): Future[Option[RunEvent]] {.async.} =
       r.finished = true
       break
     let ev = parseRunEvent(m.get)
-    if ev.kind == rekUnknown: continue
+    if ev.kind == rekUnknown:
+      if ev.isKeepalive: inc r.keepalives
+      continue
     r.track(ev)
     return some(ev)
   result = none(RunEvent)

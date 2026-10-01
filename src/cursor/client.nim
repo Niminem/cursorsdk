@@ -193,8 +193,11 @@ proc listRepositories*(c: Client): Future[seq[SdkRepository]] {.async.} =
 proc fillDefaults(c: Client, options: AgentOptions): AgentOptions =
   result = options
   if result.apiKey.len == 0: result.apiKey = c.requireApiKey()
+  # `extra["cloud"]` selects the cloud runtime (passthrough only; see README);
+  # do not force a local cwd onto such a request.
+  let cloud = not result.extra.isNil and result.extra.kind == JObject and result.extra.hasKey("cloud")
   if result.local.cwd.len == 0 and result.local.dirs.len == 0:
-    result.local.cwd = c.opts.workspace
+    if not cloud: result.local.cwd = c.opts.workspace
   elif result.local.cwd.len > 0:
     result.local.cwd = normalizeWorkspace(result.local.cwd)
 

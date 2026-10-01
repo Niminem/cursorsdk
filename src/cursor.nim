@@ -11,14 +11,14 @@
 ## proc main() {.async.} =
 ##   let client = newClient()                 # CURSOR_API_KEY from the environment
 ##   defer: waitFor client.close()
-##   let agent = await client.createAgent("composer-2")
+##   let agent = await client.createAgent("composer-2.5")
 ##   let run = await agent.send("Summarize this repository.")
 ##   while true:
 ##     let chunk = await run.nextText()
 ##     if chunk.isNone: break
 ##     stdout.write chunk.get
 ##   let res = await run.wait()
-##   echo "\nstatus: ", res.status
+##   echo "\nstatus: ", res.status, "  text: ", res.text
 ##   await agent.close()
 ##
 ## waitFor main()

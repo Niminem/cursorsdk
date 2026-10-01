@@ -207,7 +207,7 @@ type
     value*: string
 
   ModelSelection* = object
-    id*: string                      ## e.g. "composer-2"
+    id*: string                      ## e.g. "composer-2.5"; discover ids via `Client.listModels`
     params*: seq[ModelParameterValue]
 
   SdkImage* = object
@@ -388,7 +388,8 @@ proc toJson*(o: AgentOptions): JsonNode =
   if o.model.id.len > 0: result["model"] = o.model.toJson
   addIf(result, "apiKey", o.apiKey.len > 0, o.apiKey)
   addIf(result, "name", o.name.len > 0, o.name)
-  result["local"] = o.local.toJson
+  let local = o.local.toJson
+  if local.len > 0: result["local"] = local
   if o.mcpServers.len > 0:
     var servers = newJObject()
     for name, c in o.mcpServers: servers[name] = c.toJson
@@ -672,6 +673,16 @@ proc parseRunEvent*(n: JsonNode): RunEvent =
     return RunEvent(kind: rekStep, offset: offset, raw: n, stepType: jStr(s, "type"),
                     step: (let p = jObj(s, "step"); if p.isNil: newJObject() else: p))
   RunEvent(kind: rekUnknown, offset: offset, raw: n)
+
+proc isKeepalive*(e: RunEvent): bool =
+  ## True for an empty envelope: no `envelope` case set (at most an
+  ## `offset`). The bridge sends these while a run is idle, e.g. during a
+  ## long tool call. Unknown envelope cases are `rekUnknown` but not keepalives.
+  if e.kind != rekUnknown: return false
+  if e.raw.isNil or e.raw.kind != JObject: return true
+  for k, _ in e.raw:
+    if k != "offset": return false
+  true
 
 proc parseAgentMessage*(n: JsonNode): AgentMessage =
   AgentMessage(msgType: jStr(n, "type"), uuid: jStr(n, "uuid"), agentId: jStr(n, "agentId"),

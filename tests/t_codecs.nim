@@ -158,9 +158,12 @@ suite "types":
   test "run events":
     let keepalive = parseRunEvent(%*{})
     check keepalive.kind == rekUnknown
+    check keepalive.isKeepalive
+    check parseRunEvent(%*{"offset": "9"}).isKeepalive
     let future = parseRunEvent(%*{"somethingNew": {}, "offset": "7"})
     check future.kind == rekUnknown
     check future.offset == "7"
+    check not future.isKeepalive
     let msg = parseRunEvent(%*{"sdkMessage": {"type": "assistant", "message": {"run_id": "run-1", "agent_id": "agent-1",
       "message": {"content": [{"type": "text", "text": "Hel"}, {"type": "tool_use"}, {"type": "text", "text": "lo"}]}}}, "offset": "3"})
     check msg.kind == rekMessage
@@ -187,7 +190,7 @@ suite "types":
     o.local.settingSources = @[ssProject, ssUser]
     o.local.store = some(LocalAgentStoreConfig(kind: "jsonl", rootDir: "/s"))
     o.local.customTools["echo"] = CustomToolDefinition(description: some("d"), inputSchema: %*{"type": "object"})
-    o.tools = some(@["read_file"])
+    o.tools = some(@["read"])
     o.disallowedTools = @["shell"]
     o.mcpServers["fs"] = McpServerConfig(kind: mskStdio, command: "npx", args: @["srv"])
     o.mcpServers["web"] = McpServerConfig(kind: mskHttp, url: "http://x", transport: hmtSse)
@@ -201,12 +204,14 @@ suite "types":
     check j["local"]["settingSources"] == %["SETTING_SOURCE_PROJECT", "SETTING_SOURCE_USER"]
     check j["local"]["store"]["type"].getStr == "jsonl"
     check j["local"]["customTools"]["echo"]["description"].getStr == "d"
-    check j["tools"]["names"] == %["read_file"]
+    check j["tools"]["names"] == %["read"]
     check j["disallowedTools"] == %["shell"]
     check j["mcpServers"]["fs"]["stdio"]["command"].getStr == "npx"
     check j["mcpServers"]["web"]["http"]["type"].getStr == "HTTP_MCP_TRANSPORT_TYPE_SSE"
     check j["cloud"]["env"]["type"].getStr == "CLOUD_ENVIRONMENT_TYPE_CLOUD"
     check not j.hasKey("agentId")
+    # An empty `local` is omitted so `extra["cloud"]` can select the runtime.
+    check not AgentOptions(model: model("m")).toJson.hasKey("local")
   test "SendOptions serialization omits defaults":
     check SendOptions().toJson == %*{}
     let j = SendOptions(enableDeltas: true, force: some(true), model: some(model("m"))).toJson

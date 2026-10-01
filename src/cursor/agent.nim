@@ -23,7 +23,7 @@ proc createAgent*(c: Client, options: AgentOptions, idempotencyKey = ""): Future
 
 proc createAgent*(c: Client, model: string, cwd = "", name = "",
                   mode = amoUnspecified): Future[Agent] =
-  ## Convenience: `await client.createAgent("composer-2")`.
+  ## Convenience: `await client.createAgent("composer-2.5")`.
   var o = AgentOptions(model: ModelSelection(id: model), name: name, mode: mode)
   o.local.cwd = cwd
   c.createAgent(o)
@@ -56,14 +56,27 @@ proc close*(a: Agent): Future[void] =
   a.client.closeAgent(a.id)
 proc archive*(a: Agent): Future[void] = a.client.archiveAgent(a.id, a.cwd)
 proc unarchive*(a: Agent): Future[void] = a.client.unarchiveAgent(a.id, a.cwd)
-proc delete*(a: Agent): Future[void] =
-  ## Permanently deletes the agent and its durable data.
-  a.client.deleteAgent(a.id, a.cwd)
-
 proc runs*(a: Agent, options = ListRunsOptions()): Future[Page[RunSnapshot]] =
   var o = options
   if o.cwd.len == 0: o.cwd = a.cwd
   a.client.listRuns(a.id, o)
+
+proc delete*(a: Agent, force = false) {.async.} =
+  ## Permanently deletes the agent and its durable data. The bridge refuses
+  ## to delete an agent whose active run is not terminal; with `force`,
+  ## every non-terminal run is cancelled first (see "Notes on this bridge
+  ## release" in the README).
+  if force:
+    var cursor = ""
+    while true:
+      let page = await a.runs(ListRunsOptions(cursor: cursor))
+      for r in page.items:
+        if not r.status.isTerminal:
+          try: await a.client.cancelRun(r.runId, a.id)
+          except RunNotCancellableError: discard   # became terminal meanwhile
+      cursor = page.nextCursor
+      if cursor.len == 0: break
+  await a.client.deleteAgent(a.id, a.cwd)
 proc messages*(a: Agent, options = ListAgentMessagesOptions()): Future[seq[AgentMessage]] =
   var o = options
   if o.cwd.len == 0: o.cwd = a.cwd
@@ -71,15 +84,15 @@ proc messages*(a: Agent, options = ListAgentMessagesOptions()): Future[seq[Agent
 proc usage*(a: Agent, runId = ""): Future[AgentUsage] = a.client.getUsage(a.id, runId)
 
 proc prompt*(c: Client, text: string, model: string, cwd = "",
-             options = SendOptions()): Future[string] {.async.} =
+             options = SendOptions()): Future[RunResult] {.async.} =
   ## One-shot: create an agent, send `text`, wait, close the agent, and
-  ## return the final assistant text. Raises `RunError` if the run fails.
+  ## return the terminal `RunResult` (`.text` is the final assistant text).
+  ## Raises `RunError` if the run ends in `ERROR`, `CANCELLED`, or `EXPIRED`.
   let agent = await c.createAgent(model, cwd)
   try:
     let run = await agent.send(text, options)
-    discard await run.wait()
+    result = await run.wait()
     run.raiseIfFailed()
-    result = run.text
   finally:
     try: await agent.close()
     except CatchableError: discard
