@@ -84,6 +84,11 @@ let res = await client.prompt("Reply with one word: ready?", model = "composer-2
 echo res.text, " (", res.durationMs, " ms)"
 ```
 
+The fragments in the rest of this README omit their imports. Besides
+`std/asyncdispatch` and `cursorsdk` they need `std/json` (`JsonNode`, `%*`)
+and `std/tables` (the `mcpServers` / `customTools` tables); `Option` helpers
+such as `some` come with `cursorsdk`.
+
 Two things to know before running anything larger:
 
 - **Tool calls are not gated.** A local agent reads, writes, and runs shell
@@ -99,7 +104,7 @@ returns the ids, parameters, and preset variants available to your account.
 
 | Type             | Role                                                                                                                                                                                                 |
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Client`         | Owns the bridge process and transport. Typed low-level RPCs for every `SdkAgentService`, `SdkCursorService`, and `SdkBridgeControlService` method, plus `call`/`stream` escape hatches for raw JSON. `relaunches` counts bridge relaunches. |
+| `Client`         | Owns the bridge process and transport. Typed low-level RPCs for every `SdkAgentService`, `SdkCursorService`, and `SdkBridgeControlService` method (`Shutdown` is issued by `close`), plus `call`/`stream` escape hatches for raw JSON. `relaunches` counts bridge relaunches. |
 | `Agent`          | `createAgent` / `resumeAgent`; `send` → `Run`; `id`, `model`, `cwd`; `info`, `reload`, `close`, `archive`, `unarchive`, `delete(force)`, `cancelNonTerminalRuns`, `runs`, `messages`, `usage`.      |
 | `Run`            | `next` (events), `nextText` (assistant text), `wait` (terminal `RunResult`), `text`, `failed`, `raiseIfFailed`, `observe` (re-attach after a dropped stream), `cancel`, `close`, `keepalives`.       |
 | `CallbackServer` | Loopback server for custom tools (`registerTool`) and custom stores (`setStoreHandler`).                                                                                                             |
@@ -376,7 +381,8 @@ written as `{"agentId", "blobId", "data"}` and read back as
 Resolution order:
 
 1. `CURSOR_SDK_BRIDGE_BIN`: explicit path to a bridge executable.
-2. The user cache: `getCacheDir("cursorsdk")/<version>/bin/cursor-sdk-bridge`.
+2. The user cache: `getCacheDir("cursorsdk")/<version>/bin/cursor-sdk-bridge`
+   (`.exe` on Windows).
 3. Download `cursor-sdk-bridge-standalone-<os>-<arch>.tar.gz` for the pinned
   release from GitHub, verify it against the release's `SHA256SUMS.txt`,
    check `manifest.json`, and extract into the cache.

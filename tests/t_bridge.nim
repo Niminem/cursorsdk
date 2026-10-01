@@ -13,7 +13,18 @@ when not defined(windows):
   proc pidAlive(pid: int): bool = posix.kill(Pid(pid), 0) == 0
   proc killProcess(pid: int) = discard posix.kill(Pid(pid), SIGKILL)
 else:
-  proc killProcess(pid: int) = discard execShellCmd("taskkill /PID " & $pid & " /F >NUL 2>&1")
+  import std/winlean
+  proc pidAlive(pid: int): bool =
+    let h = openProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, DWORD(pid))
+    if h == 0: return false
+    defer: discard closeHandle(h)
+    var code: int32
+    getExitCodeProcess(h, code) != 0 and code == STILL_ACTIVE
+  proc killProcess(pid: int) =
+    let h = openProcess(PROCESS_TERMINATE, 0, DWORD(pid))
+    if h != 0:
+      discard terminateProcess(h, 1)
+      discard closeHandle(h)
 
 suite "bridge lifecycle":
   test "launch, handshake, ping, version, shutdown":
@@ -37,8 +48,7 @@ suite "bridge lifecycle":
       await b.shutdown()
       check b.hasExited
       check b.exitCode == 0
-      when not defined(windows):
-        check not pidAlive(pid)
+      check not pidAlive(pid)
       await b.shutdown()  # idempotent
     waitFor run()
 
@@ -122,8 +132,7 @@ suite "client":
 
       let pid = c.bridge.pid
       await c.close()
-      when not defined(windows):
-        check not pidAlive(pid)
+      check not pidAlive(pid)
     waitFor run()
 
   test "attach to an external bridge":
