@@ -52,7 +52,7 @@ or a Docker build:
 nimble fetchBridge
 ```
 
-This package has been verified on macOS x64. Linux and Windows are untested.
+This package has been verified on macOS (x64) and Windows. Linux is untested.
 
 ## Quick start
 
