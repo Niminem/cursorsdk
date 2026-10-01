@@ -6,7 +6,7 @@
 ##
 ## ```nim
 ## import std/asyncdispatch
-## import cursor
+## import cursorsdk
 ##
 ## proc main() {.async.} =
 ##   let client = newClient()                 # CURSOR_API_KEY from the environment
@@ -25,13 +25,13 @@
 ## ```
 ##
 ## Modules:
-## - `cursor/client`   `Client`, `ClientOptions`, typed low-level RPCs
-## - `cursor/agent`    `Agent` handle and `prompt`
-## - `cursor/run`      `Run` handle: `next`, `nextText`, `wait`, `observe`, `cancel`
-## - `cursor/types`    request/response types mirroring `sdk.v1`
-## - `cursor/errors`   `CursorError` hierarchy
-## - `cursor/callbacks` custom tool and store callback servers
-## - `cursor/bridge`   bridge process management (advanced)
+## - `cursorsdk/client`   `Client`, `ClientOptions`, typed low-level RPCs
+## - `cursorsdk/agent`    `Agent` handle and `prompt`
+## - `cursorsdk/run`      `Run` handle: `next`, `nextText`, `wait`, `observe`, `cancel`
+## - `cursorsdk/types`    request/response types mirroring `sdk.v1`
+## - `cursorsdk/errors`   `CursorError` hierarchy
+## - `cursorsdk/callbacks` custom tool and store callback servers
+## - `cursorsdk/bridge`   bridge process management (advanced)
 
-import cursor/[client, agent, run, types, errors, callbacks, version]
+import cursorsdk/[client, agent, run, types, errors, callbacks, version]
 export client, agent, run, types, errors, callbacks, version

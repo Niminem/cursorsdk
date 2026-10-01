@@ -3,7 +3,7 @@
 ## stream envelopes, and request serialization. No network, no bridge.
 
 import std/[unittest, json, options, times, tables, strutils, base64]
-import cursor/[sha256, protobuf, errors, bridge, types]
+import cursorsdk/[sha256, protobuf, errors, bridge, types]
 
 suite "sha256":
   test "known answers":

@@ -29,11 +29,11 @@ agent model in more depth than this README does.
 Not yet in the Nimble package index. Until it is, install from source:
 
 ```sh
-git clone --recursive https://github.com/Niminem/cursor   # --recursive pulls the vendored sdk-bridge protocol docs
-cd cursor && nimble install
+git clone --recursive https://github.com/Niminem/cursorsdk   # --recursive pulls the vendored sdk-bridge protocol docs
+cd cursorsdk && nimble install
 ```
 
-Once published: `nimble install cursor`.
+Once published: `nimble install cursorsdk`.
 
 Requires Nim 2.2.10 or newer. A Cursor API key is required to run agents:
 create a user API key under API Keys in the
@@ -57,7 +57,7 @@ This package has been verified on macOS x64. Linux and Windows are untested.
 
 ```nim
 import std/asyncdispatch
-import cursor
+import cursorsdk
 
 proc main() {.async.} =
   let client = newClient()                      # key from CURSOR_API_KEY, cwd as workspace
@@ -338,7 +338,7 @@ written as `{"agentId", "blobId", "data"}` and read back as
 Resolution order:
 
 1. `CURSOR_SDK_BRIDGE_BIN`: explicit path to a bridge executable.
-2. The user cache: `getCacheDir("cursor-nim")/<version>/bin/cursor-sdk-bridge`.
+2. The user cache: `getCacheDir("cursorsdk")/<version>/bin/cursor-sdk-bridge`.
 3. Download `cursor-sdk-bridge-standalone-<os>-<arch>.tar.gz` for the pinned
   release from GitHub, verify it against the release's `SHA256SUMS.txt`,
    check `manifest.json`, and extract into the cache.
@@ -405,7 +405,7 @@ as the IDE; spend appears on the usage dashboard under the SDK tag.
 ## Versioning
 
 This package pins one release of `cursor/sdk-bridge`, vendored as the
-`vendor/sdk-bridge` submodule and recorded in `src/cursor/version.nim`. The
+`vendor/sdk-bridge` submodule and recorded in `src/cursorsdk/version.nim`. The
 first three components of the nimble version equal the bridge release
 (`1.0.35`). Fixes to this package that do not change the bridge add a fourth
 component (`1.0.35.1`). `sdk.v1` evolves additively, so a client built

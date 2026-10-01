@@ -3,7 +3,7 @@
 ##
 ## Resolution order (see `locateBridge`):
 ## 1. `CURSOR_SDK_BRIDGE_BIN` environment variable.
-## 2. The per-version user cache (`getCacheDir("cursor-nim")/<version>/bin/`).
+## 2. The per-version user cache (`getCacheDir("cursorsdk")/<version>/bin/`).
 ## 3. Download the standalone archive for this platform from the pinned
 ##    GitHub release, verify it against the release's `SHA256SUMS.txt`, and
 ##    extract it into the cache.
@@ -20,7 +20,7 @@ import version, sha256, errors
 
 const
   BridgeBinEnv* = "CURSOR_SDK_BRIDGE_BIN"
-  CacheAppName = "cursor-nim"
+  CacheAppName = "cursorsdk"
 
 proc bridgeExeName*(): string =
   when defined(windows): "cursor-sdk-bridge.exe" else: "cursor-sdk-bridge"

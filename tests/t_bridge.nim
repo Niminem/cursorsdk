@@ -5,8 +5,8 @@
 ## download of the pinned release.
 
 import std/[unittest, asyncdispatch, asyncnet, json, options, strutils, os, net, tables]
-import cursor
-import cursor/[connect, http, protobuf, bridge]
+import cursorsdk
+import cursorsdk/[connect, http, protobuf, bridge]
 
 when not defined(windows):
   import std/posix

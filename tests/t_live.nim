@@ -7,7 +7,7 @@
 ## `CURSOR_TEST_VERBOSE=1` to print every stream event.
 
 import std/[unittest, asyncdispatch, json, options, strutils, os, sets, tables]
-import cursor
+import cursorsdk
 
 proc loadApiKey(): string =
   result = getEnv("CURSOR_API_KEY")
@@ -27,9 +27,9 @@ if apiKey.len == 0:
   echo "t_live: CURSOR_API_KEY not set; skipping live tests"
 else:
   suite "live":
-    var workspace = getTempDir() / "cursor-nim-live"
+    var workspace = getTempDir() / "cursorsdk-live"
     createDir(workspace)
-    writeFile(workspace / "README.md", "# Fixture\n\nThis directory exists for the cursor-nim live test.\n")
+    writeFile(workspace / "README.md", "# Fixture\n\nThis directory exists for the cursorsdk live test.\n")
 
     var o = initClientOptions()
     o.apiKey = apiKey
