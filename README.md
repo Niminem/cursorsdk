@@ -398,13 +398,15 @@ closing it. POSIX allows unlinking open files; Windows refuses with
 registered, and the delete succeeds from a fresh bridge process (restart the
 client, then delete). Agents that never ran have no `store.db` yet, so
 `delete(force = true)` on a fresh agent works everywhere.
-- **Cancelling a run early in its life crashes the bridge** (Bun "Internal
-assertion failure", exit code 3; every later RPC then fails with
-"connection closed" or "connection refused"). The window is wider than the
-first event: a `thinking` start frame can arrive within tens of ms on a warm
-agent and cancelling there still crashes. Before calling `run.cancel()`, wait
-until real text (`assistantText` / `thinkingText`) has streamed and at least
-a second has passed. This narrows the race; it does not eliminate it.
+- **Windows: `run.cancel()` can crash the bridge.** `CancelRun` succeeds and
+the run reports `CANCELLED`, but within about a second the bridge process
+can die with a Bun "Internal assertion failure" (exit code 3); every later
+RPC then fails with `TransportError` ("connection closed" / "connection
+refused"). Cancelling on the first stream event crashes it every time;
+cancelling after real text has streamed crashes it some of the time. There
+is no client-side timing that avoids it. If you cancel on Windows, treat a
+`TransportError` afterwards as "bridge gone": `close()` the client and
+create a new one. macOS/Linux are not affected.
 
 
 

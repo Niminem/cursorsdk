@@ -267,25 +267,42 @@ else:
       waitFor run()
 
     test "cancel an in-flight run":
+      # On Windows, bridge 1.0.35 can crash (Bun assertion, exit 3) shortly
+      # *after* a successful CancelRun, regardless of timing. Run this test
+      # on its own bridge so a crash cannot take down the tests that follow.
       proc run() {.async.} =
-        let run = await agent.send(
-          "Write a very long essay (at least 3000 words) about the history of compilers.")
-
-        # Bridge 1.0.35 crashes (Bun assertion, exit 3) if CancelRun lands
-        # early in a run's life. Only cancel once real text has streamed
-        # for >= 1 s; a bare `thinking` start frame arrives too soon.
-        let t0 = getMonoTime()
-        while true:
-          let ev = await run.next()
-          if ev.isNone: break
-          let e = ev.get
-          let gotText = e.assistantText.len > 0 or e.thinkingText.len > 0
-          if gotText and getMonoTime() - t0 >= initDuration(seconds = 1): break
-        check run.runId.len > 0
-        await run.cancel()
-        let res = await run.wait()
-        echo "  status after cancel: ", res.status
-        check res.status in {rlsCancelled, rlsFinished}
+        var co = initClientOptions()
+        co.apiKey = apiKey
+        co.workspace = workspace
+        let cancelClient = newClient(co)
+        try:
+          let a = await cancelClient.createAgent(modelId)
+          let run = await a.send(
+            "Write a very long essay (at least 3000 words) about the history of compilers.")
+          # Cancel only once real text has streamed for >= 1 s; cancelling
+          # on the first event crashes the bridge every time on Windows.
+          let t0 = getMonoTime()
+          while true:
+            let ev = await run.next()
+            if ev.isNone: break
+            let e = ev.get
+            let gotText = e.assistantText.len > 0 or e.thinkingText.len > 0
+            if gotText and getMonoTime() - t0 >= initDuration(seconds = 1): break
+          check run.runId.len > 0
+          await run.cancel()
+          let res = await run.wait()
+          echo "  status after cancel: ", res.status
+          check res.status in {rlsCancelled, rlsFinished}
+          await sleepAsync(1_500)   # the post-cancel crash lands within ~1 s
+          let crashed = cancelClient.bridge != nil and cancelClient.bridge.hasExited
+          if crashed:
+            echo "  !! bridge crashed after cancel (known 1.0.35 Windows bug), exit code ",
+                 cancelClient.bridge.exitCode
+          when not defined(windows):
+            check not crashed
+        finally:
+          try: await cancelClient.close()
+          except CatchableError: discard
       waitFor run()
 
     test "prompt one-shot":
