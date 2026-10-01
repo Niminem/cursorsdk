@@ -106,7 +106,7 @@ returns the ids, parameters, and preset variants available to your account.
 
 | Type             | Role                                                                                                                                                                                                 |
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Client`         | Owns the bridge process and transport. Typed low-level RPCs for every `SdkAgentService`, `SdkCursorService`, and `SdkBridgeControlService` method (`Shutdown` is issued by `close`), plus `call`/`stream` escape hatches for raw JSON. `relaunches` counts bridge relaunches; `maxConcurrentAgents` / `loadedAgents` expose the advertised agent limit and this client's loaded count. |
+| `Client`         | Owns the bridge process and transport. Typed low-level RPCs for every `SdkAgentService`, `SdkCursorService`, and `SdkBridgeControlService` method (`Shutdown` is issued by `close`), plus `call`/`stream` escape hatches for raw JSON. `relaunches` counts bridge relaunches and `restartBridge` forces one; `maxConcurrentAgents` / `loadedAgents` expose the advertised agent limit and this client's loaded count. |
 | `Agent`          | `createAgent` / `resumeAgent`; `send` → `Run`; `id`, `model`, `cwd`; `info`, `reload`, `close`, `archive`, `unarchive`, `delete(force)`, `cancelNonTerminalRuns`, `runs`, `messages`, `usage`.      |
 | `Run`            | `next` (events), `nextText` (assistant text), `wait` (terminal `RunResult`), `text`, `failed`, `raiseIfFailed`, `observe` (re-attach after a dropped stream), `cancel`, `close`, `keepalives`.       |
 | `CallbackServer` | Loopback server for custom tools (`registerTool`) and custom stores (`setStoreHandler`).                                                                                                             |
@@ -150,6 +150,22 @@ client's own bookkeeping: agents loaded through the raw `call` escape
 hatch, or by another client attached to the same bridge, are not counted.
 The bridge itself does not enforce the limit (see "Notes on this bridge
 release").
+
+For long-running hosts, pin the model catalog so creating and resuming
+agents never touches the network:
+
+```nim
+o.modelCatalog = await newClient(apiKey = key).listModels()  # fetch once, refresh on your schedule
+o.agentLoadTimeoutMs = 15_000        # CreateAgent / ResumeAgent only; default: unaryTimeoutMs
+```
+
+Without it, the bridge validates `AgentOptions.model` against a `ListModels`
+call it makes itself, with no timeout, on the first load per process, and a
+hang there wedges every later `createAgent` / `resumeAgent` until the
+process is replaced (see "Notes on this bridge release"). With it, validation
+is local. `modelCatalog` relies on an undocumented bridge environment
+variable (`CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON`, verified on 1.0.35); only
+model IDs are passed, so use the canonical IDs the catalog returns.
 
 Attach to a bridge you already run (tests, hosts that manage the process):
 
@@ -203,6 +219,22 @@ o.autoRelaunch = true                # default
 o.onBridgeRelaunch = proc(exitCode: int, outputTail: string) {.gcsafe.} =
   stderr.writeLine "bridge exited (", exitCode, "), relaunching\n", outputTail
 # later: client.relaunches  # how many times it has happened
+```
+
+A bridge that is up but wedged does not relaunch by itself. `await
+client.restartBridge()` replaces the process on demand with the same
+semantics as a crash relaunch (`relaunches` increments, `loadedAgents`
+resets, handles re-resume on their next `send`, in-progress runs on the old
+process are lost). The known case is a `TransportError` timeout from
+`createAgent` / `resumeAgent`; retrying without a restart hits the same hung
+call:
+
+```nim
+try:
+  agent = await client.createAgent(modelId)
+except TransportError:
+  await client.restartBridge()
+  agent = await client.createAgent(modelId)
 ```
 
 Set `autoRelaunch = false` to get a hard `TransportError` instead. Attached
@@ -474,8 +506,19 @@ with `status: "queued"` during `CreateAgent`).
 - `agent.usage()` (`GetUsage`) is cloud-only: local agents get an
 `InternalError` whose message says `feature_unavailable`. `listArtifacts` /
 `downloadArtifact` are likewise cloud-only.
-- `createAgent` validates the model against the catalog, so it needs a
-working API key and network even though the agent runs locally.
+- `createAgent` and `resumeAgent` validate the model against the catalog,
+so they need a working API key and network even though the agent runs
+locally. The bridge fetches the catalog itself (`GET /v1/models`) on the
+first load per process and per API key, with no timeout, and caches the
+pending promise; a request that stalls therefore never fails, never expires,
+and blocks every later `CreateAgent` / `ResumeAgent` on that process. Runs
+on already-loaded agents are unaffected. From this client it surfaces as
+`TransportError: SdkAgentService/CreateAgent: timed out`; the fixes are
+`modelCatalog` (no network call at all) and `restartBridge` on timeout (see
+"Client options" and "Bridge resilience"). Observed once in the live suite
+on a freshly spawned bridge; read from the 1.0.35 binary
+(`CloudApiClient.request` is a bare `fetch`, `localModelListCache` evicts
+only on rejection).
 - `--max-concurrent-agents` is advertised on the ready line but not
 enforced: a second `CreateAgent` against a limit of 1 succeeds. This
 package enforces the advertised value client-side (see

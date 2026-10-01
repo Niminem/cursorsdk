@@ -12,6 +12,9 @@ export bridge.Bridge, bridge.BridgeInfo, bridge.hasExited, bridge.waitExit, brid
 
 const
   ApiKeyEnv* = "CURSOR_API_KEY"
+  ModelCatalogEnv* = "CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON"
+    ## Bridge 1.0.35 reads this (undocumented upstream) instead of calling
+    ## `ListModels` when validating `AgentOptions.model`; see `modelCatalog`.
   AgentService = "SdkAgentService"
   CursorService = "SdkCursorService"
   ControlService = "SdkBridgeControlService"
@@ -45,6 +48,18 @@ type
     unaryTimeoutMs*: int
       ## Deadline for unary RPCs; 0 → 60 000. `WaitLiveRun` is exempt (it
       ## blocks for as long as the run takes), as are streams.
+    agentLoadTimeoutMs*: int
+      ## Deadline for `CreateAgent` / `ResumeAgent` only; 0 → `unaryTimeoutMs`.
+      ## On bridge 1.0.35 these make an untimed `ListModels` call to the
+      ## Cursor API the first time per process (see README, "Notes on this
+      ## bridge release"); a timeout here means that call hung, and the
+      ## bridge will stay hung for every later load until `restartBridge`.
+    modelCatalog*: seq[SdkModel]
+      ## When non-empty, handed to the bridge as `ModelCatalogEnv` so model
+      ## validation is local and `createAgent` / `resumeAgent` never call
+      ## the Cursor API. Fetch it once with `listModels()`. Only `id` is
+      ## used; pass the canonical IDs the catalog returns. Ignored for
+      ## `bridgeUrl`.
     allowDownload*: bool         ## default true
     autoRelaunch*: bool
       ## Default true. If the managed bridge exits unexpectedly, the next
@@ -110,6 +125,15 @@ proc requireApiKey*(c: Client): string =
       "no Cursor API key: set " & ApiKeyEnv & " or ClientOptions.apiKey")
   c.opts.apiKey
 
+proc modelCatalogJson*(models: seq[SdkModel]): string =
+  ## The `ModelCatalogEnv` value for `models`: a JSON array of `{"id": ...}`.
+  var arr = newJArray()
+  for m in models: arr.add %*{"id": m.id}
+  $arr
+
+proc agentLoadTimeout(c: Client): int =
+  if c.opts.agentLoadTimeoutMs > 0: c.opts.agentLoadTimeoutMs else: -1
+
 proc startImpl(c: Client) {.async.} =
   # Misconfiguration is reported here, before anything is spawned.
   # `launchBridge` checks the callback pairs itself (protocol.md: supplying
@@ -131,6 +155,8 @@ proc startImpl(c: Client) {.async.} =
     lo.apiKey = c.opts.apiKey
     lo.verbose = c.opts.verbose
     lo.env = c.opts.env
+    if c.opts.modelCatalog.len > 0:
+      lo.env.add (ModelCatalogEnv, modelCatalogJson(c.opts.modelCatalog))
     lo.extraArgs = c.opts.bridgeArgs
     lo.startupTimeoutMs = c.opts.startupTimeoutMs
     lo.allowDownload = c.opts.allowDownload
@@ -189,6 +215,16 @@ proc start*(c: Client): Future[void] =
 
 proc isStarted*(c: Client): bool = c.rpc != nil
 
+proc dropBridge(c: Client) {.async.} =
+  ## Forgets the current (exited or shut-down) bridge so the next `start`
+  ## spawns a new process. Shared by crash relaunch and `restartBridge`.
+  await c.bridge.shutdown()   # already exited: just releases resources
+  c.bridge = nil
+  c.rpc = nil
+  c.startFut = nil
+  c.loadedIds.clear()         # a fresh process has nothing loaded
+  inc c.relaunches
+
 proc needsRelaunch(c: Client): bool =
   c.opts.autoRelaunch and not c.closed and
     c.bridge != nil and c.bridge.managed and c.bridge.hasExited and
@@ -203,18 +239,28 @@ proc ensure(c: Client) {.async.} =
     if c.opts.onBridgeRelaunch != nil:
       try: c.opts.onBridgeRelaunch(c.bridge.exitCode, c.bridge.outputTailText())
       except CatchableError: discard
-    await c.bridge.shutdown()   # already exited: just releases resources
-    c.bridge = nil
-    c.rpc = nil
-    c.startFut = nil
-    c.loadedIds.clear()         # a fresh process has nothing loaded
-    inc c.relaunches
+    await c.dropBridge()
   await c.start()
 
 proc ensureBridge*(c: Client): Future[void] =
   ## Starts the bridge, relaunching it first if it died. Normally implicit
   ## in every RPC; exposed so handles can check `relaunches` beforehand.
   c.ensure()
+
+proc restartBridge*(c: Client, graceSeconds = 0, timeoutMs = 5_000) {.async.} =
+  ## Shuts the managed bridge down and starts a fresh process, as if it had
+  ## crashed: `relaunches` increments, `loadedAgents` resets, and `Agent`
+  ## handles re-resume themselves on their next `send`. Runs in progress on
+  ## the old process are lost. For a bridge that is up but wedged, e.g. a
+  ## `CreateAgent` / `ResumeAgent` timeout on 1.0.35 (see README, "Notes on
+  ## this bridge release"); a crashed bridge relaunches by itself. No-op for
+  ## an attached bridge or a client that has never started.
+  if c.closed or c.bridge.isNil or not c.bridge.managed: return
+  if not c.startFut.isNil and not c.startFut.finished:
+    await c.startFut             # do not tear down a start in progress
+  await c.bridge.shutdown(graceSeconds, timeoutMs)
+  await c.dropBridge()
+  await c.start()
 
 proc close*(c: Client, graceSeconds = 0, timeoutMs = 5_000) {.async.} =
   ## Shuts the managed bridge down (`Shutdown` RPC → wait → kill).
@@ -327,12 +373,14 @@ proc admitAgent(c: Client, agentId = "") =
 proc createAgentRaw*(c: Client, options: AgentOptions, idempotencyKey = ""):
     Future[tuple[agentId: string, model: ModelSelection]] {.async.} =
   ## Raises `RateLimitError` client-side when the bridge's advertised
-  ## `maxConcurrentAgents` is reached (see `loadedAgents`).
+  ## `maxConcurrentAgents` is reached (see `loadedAgents`). A
+  ## `TransportError` timeout here (`agentLoadTimeoutMs`) means the bridge's
+  ## model-validation call hung; call `restartBridge` before retrying.
   var req = %*{"options": c.fillDefaults(options).toJson}
   if idempotencyKey.len > 0: req["idempotencyKey"] = %idempotencyKey
   await c.ensure()            # the limit is known only once the bridge is up
   c.admitAgent()
-  let r = await c.call(AgentService, "CreateAgent", req)
+  let r = await c.call(AgentService, "CreateAgent", req, c.agentLoadTimeout)
   result = (jStr(r, "agentId"), parseModelSelection(jObj(r, "model")))
   c.loadedIds.incl result.agentId
 
@@ -343,7 +391,7 @@ proc resumeAgentRaw*(c: Client, agentId: string, options: AgentOptions):
   let req = %*{"agentId": agentId, "options": c.fillDefaults(options).toJson}
   await c.ensure()
   c.admitAgent(agentId)
-  let r = await c.call(AgentService, "ResumeAgent", req)
+  let r = await c.call(AgentService, "ResumeAgent", req, c.agentLoadTimeout)
   result = (jStr(r, "agentId", agentId), parseModelSelection(jObj(r, "model")))
   c.loadedIds.incl result.agentId
 

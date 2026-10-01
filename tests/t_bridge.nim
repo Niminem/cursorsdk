@@ -265,6 +265,30 @@ suite "client":
       await c.close()
     waitFor run()
 
+  test "restartBridge replaces the process like a crash relaunch":
+    proc run() {.async.} =
+      var o = initClientOptions()
+      o.workspace = getTempDir()
+      o.modelCatalog = @[SdkModel(id: "composer-2.5")]
+      let c = newClient(o)
+      await c.restartBridge()                   # never started: no-op
+      check c.relaunches == 0
+      await c.start()
+      let pid1 = c.bridge.pid
+      await c.restartBridge()
+      check c.relaunches == 1
+      check c.bridge.pid != pid1
+      check not pidAlive(pid1)
+      check (await c.ping()) == "pong"
+      await c.close()
+      await c.restartBridge()                   # closed: no-op
+      check c.relaunches == 1
+    waitFor run()
+
+  test "modelCatalogJson emits ids only":
+    check modelCatalogJson(@[SdkModel(id: "a", displayName: "A"), SdkModel(id: "b")]) ==
+      """[{"id":"a"},{"id":"b"}]"""
+
   test "GetVersion protocol mismatch is a BridgeError":
     # A fake bridge that answers every RPC with a GetVersionResponse for a
     # protocol this client does not speak. Attach to it: the start must

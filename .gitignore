@@ -4,3 +4,6 @@ nimcache/
 tests/t_*
 !tests/t_*.nim
 .env
+nimble.develop
+nimble.paths
+nimbledeps

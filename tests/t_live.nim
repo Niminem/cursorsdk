@@ -60,12 +60,22 @@ else:
       o.onBridgeOutput = proc(line: string) {.gcsafe.} = stderr.writeLine("[bridge] " & line)
     let client = newClient(o)
     var modelId = getEnv("CURSOR_TEST_MODEL")
+    var models: seq[SdkModel]
+
+    proc secondaryOptions(): ClientOptions =
+      # Tests that need a private bridge. Bridge 1.0.35 validates the model
+      # on the first CreateAgent per process with an untimed ListModels call
+      # (README, "Notes on this bridge release"); hand it the catalog so
+      # these tests cannot hang on the network, and fail fast if they do.
+      result = o
+      result.modelCatalog = models
+      result.agentLoadTimeoutMs = 15_000
 
     test "catalog: me and models":
       proc run() {.async.} =
         let me = await client.me()
         check me.apiKeyName.len > 0 or me.userEmail.len > 0
-        let models = await client.listModels()
+        models = await client.listModels()
         check models.len > 0
         if modelId.len == 0:
           modelId = "composer-2.5"
@@ -292,9 +302,7 @@ else:
       # private bridge so other tests are unaffected, then prove the client
       # auto-relaunches and the same agent keeps working.
       proc run() {.async.} =
-        var co = initClientOptions()
-        co.apiKey = apiKey
-        co.workspace = workspace
+        var co = secondaryOptions()
         var hookCalls = 0
         co.onBridgeRelaunch = proc(exitCode: int, tail: string) {.gcsafe.} =
           inc hookCalls
@@ -347,10 +355,7 @@ else:
 
     test "bridge dies mid-run: wait() reports the run as lost, agent recovers":
       proc run() {.async.} =
-        var ko = initClientOptions()
-        ko.apiKey = apiKey
-        ko.workspace = workspace
-        let killClient = newClient(ko)
+        let killClient = newClient(secondaryOptions())
         try:
           let a = await killClient.createAgent(modelId)
           let run = await a.send(
@@ -401,15 +406,32 @@ else:
           discard await client.getAgent(fresh.id)
       waitFor run()
 
+    test "modelCatalog makes model validation local":
+      # A model id the real catalog does not have is accepted when our
+      # catalog lists it, so the bridge consulted the env var, not the API.
+      # One that neither has is rejected locally. No runs are started.
+      proc run() {.async.} =
+        var mo = secondaryOptions()
+        mo.modelCatalog = @[SdkModel(id: "cursorsdk-test-not-a-real-model")]
+        let local = newClient(mo)
+        try:
+          let a = await local.createAgent("cursorsdk-test-not-a-real-model")
+          check a.model.id == "cursorsdk-test-not-a-real-model"
+          await a.delete(force = true)
+          expect RpcError:
+            discard await local.createAgent(modelId)   # real model, not in our catalog
+        finally:
+          try: await local.close()
+          except CatchableError: discard
+      waitFor run()
+
     test "advertised maxConcurrentAgents is enforced client-side":
       # Bridge 1.0.35 advertises `--max-concurrent-agents` on the ready line
       # but does not enforce it (a second CreateAgent against a limit of 1
       # succeeds), so the client refuses from its own count of loaded
       # agents. No runs: only CreateAgent/ResumeAgent/Close/Delete calls.
       proc run() {.async.} =
-        var lo = initClientOptions()
-        lo.apiKey = apiKey
-        lo.workspace = workspace
+        var lo = secondaryOptions()
         lo.bridgeArgs = @["--max-concurrent-agents", "1"]
         let limited = newClient(lo)
         try:

@@ -50,6 +50,10 @@ proc clientOptions() =
   let client = newClient(o)
   discard client
 
+proc catalogOptions(o: var ClientOptions, key: string) {.async.} =
+  o.modelCatalog = await newClient(apiKey = key).listModels()  # fetch once, refresh on your schedule
+  o.agentLoadTimeoutMs = 15_000        # CreateAgent / ResumeAgent only; default: unaryTimeoutMs
+
 proc attachOptions(o: var ClientOptions) =
   o.bridgeUrl = "http://127.0.0.1:49152"
   o.bridgeToken = readFile("/path/to/auth-token").strip   # strip: std/strutils
@@ -61,6 +65,15 @@ proc resilienceOptions(o: var ClientOptions) =
   o.onBridgeRelaunch = proc(exitCode: int, outputTail: string) {.gcsafe.} =
     stderr.writeLine "bridge exited (", exitCode, "), relaunching\n", outputTail
   # later: client.relaunches  # how many times it has happened
+
+proc restartOnWedge(client: Client, modelId: string) {.async.} =
+  var agent: Agent
+  try:
+    agent = await client.createAgent(modelId)
+  except TransportError:
+    await client.restartBridge()
+    agent = await client.createAgent(modelId)
+  discard agent
 
 # --- Agent options ------------------------------------------------------------
 
