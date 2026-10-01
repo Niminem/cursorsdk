@@ -108,7 +108,7 @@ returns the ids, parameters, and preset variants available to your account.
 | `Agent`          | `createAgent` / `resumeAgent`; `send` → `Run`; `id`, `model`, `cwd`; `info`, `reload`, `close`, `archive`, `unarchive`, `delete(force)`, `cancelNonTerminalRuns`, `runs`, `messages`, `usage`.      |
 | `Run`            | `next` (events), `nextText` (assistant text), `wait` (terminal `RunResult`), `text`, `failed`, `raiseIfFailed`, `observe` (re-attach after a dropped stream), `cancel`, `close`, `keepalives`.       |
 | `CallbackServer` | Loopback server for custom tools (`registerTool`) and custom stores (`setStoreHandler`).                                                                                                             |
-| `ClientOptions`  | API key, workspace, bridge path/URL/token, state root, default store, callback endpoints, extra bridge `env`, `verbose` / `onBridgeOutput` logging, startup/RPC timeouts, `allowDownload`, `autoRelaunch` / `onBridgeRelaunch`. |
+| `ClientOptions`  | API key, workspace, bridge path/URL/token, extra bridge `env` and `bridgeArgs`, state root, default store, callback endpoints, `verbose` / `onBridgeOutput` logging, startup/RPC timeouts, `allowDownload`, `autoRelaunch` / `onBridgeRelaunch`. |
 
 Mapping to first-party names where they differ: `Agent.create` →
 `client.createAgent`, `Agent.resume` → `client.resumeAgent`, `run.stream()`
@@ -127,8 +127,15 @@ o.apiKey = "key_..."                 # default: CURSOR_API_KEY
 o.workspace = "/path/to/repo"        # default: current directory
 o.verbose = true                     # bridge logs every RPC (name, outcome, duration) to stderr
 o.onBridgeOutput = proc(line: string) {.gcsafe.} = stderr.writeLine line
+o.env = @[("CURSOR_SDK_BRIDGE_PORT", "49152")]   # extra bridge environment
+o.bridgeArgs = @["--max-concurrent-agents", "4"] # extra bridge flags
 let client = newClient(o)
 ```
+
+`bridgeArgs` is appended verbatim to the bridge command line, for the flags
+that have no environment variable (`--max-concurrent-agents`,
+`--max-message-bytes`); an unknown flag makes the bridge exit before it is
+ready, with its usage text in `BridgeError.stderr`.
 
 Attach to a bridge you already run (tests, hosts that manage the process):
 
@@ -141,6 +148,17 @@ Attached bridges are not shut down by `client.close()`. Nothing is spawned
 until the first RPC (or `await client.start()`); `client.ping()`,
 `client.bridgeVersion()`, and `client.hasCapability("agent.usage")` report
 bridge health, version, and feature flags.
+
+Two checks run at start, before any other RPC. Option pairs must be
+complete: `bridgeUrl`/`bridgeToken`, `toolCallbackUrl`/`toolCallbackToken`,
+and `storeCallbackUrl`/`storeCallbackToken` are each both-or-neither, and
+setting only one raises `BridgeError` before anything is spawned (the
+protocol calls a lone URL or token a startup error). Then, once the bridge
+is reachable, `GetVersion` must report protocol `sdk.v1`; a managed bridge
+that fails this is shut down and a `BridgeError` names the protocol and
+version it reported. The downloaded archive's `manifest.json` is checked
+too, but that covers only the download path, not `CURSOR_SDK_BRIDGE_BIN` or
+an attached bridge.
 
 ### Bridge resilience
 
@@ -376,6 +394,14 @@ written as `{"agentId", "blobId", "data"}` and read back as
 [docs/services.md](vendor/sdk-bridge/docs/services.md) for the rules;
 `tests/t_live.nim` has a complete in-memory store.
 
+Checkpoint blobs grow with the conversation. `newCallbackServer(maxBody =
+...)` caps the `Content-Length` a callback request may carry; the default,
+`DefaultCallbackMaxBody` (64 MiB), is well above the 8 MiB that
+`std/asynchttpserver` would otherwise apply. A larger body is refused with
+a bare HTTP 413 before your handler runs, which the bridge reports as a
+store failure. (The server cannot take this from the bridge's advertised
+`maxMessageBytes`: it has to be bound before the bridge is launched.)
+
 ## The bridge binary
 
 Resolution order:
@@ -385,7 +411,8 @@ Resolution order:
    (`.exe` on Windows).
 3. Download `cursor-sdk-bridge-standalone-<os>-<arch>.tar.gz` for the pinned
   release from GitHub, verify it against the release's `SHA256SUMS.txt`,
-   check `manifest.json`, and extract into the cache.
+   check `manifest.json` (`protocol` is `sdk.v1`, `sdkVersion` is the
+   pinned release), and extract into the cache.
 
 Downloads shell out to `curl` and extraction to `tar`; both ship with macOS,
 Windows 10+, and Linux. Compile with `-d:ssl` to download with
@@ -484,8 +511,9 @@ nimble test
 - `tests/t_codecs.nim`: pure unit tests (no network).
 - `tests/t_bridge.nim`: spawns a real bridge, exercises handshake, auth,
 streaming errors, shutdown, attaching to an external bridge, auto-relaunch
-after the process is killed (and the opt-out), and the callback server
-(JSON, binary protobuf, chunked bodies). Needs the bridge binary
+after the process is killed (and the opt-out), URL/token pair validation,
+the `GetVersion` protocol check (against a fake bridge), and the callback
+server (JSON, binary protobuf, chunked bodies). Needs the bridge binary
 (downloaded if absent) but no API key.
 - `tests/t_live.nim`: full turns against Cursor's API, including a custom
 tool round trip with a >15 s tool pause (keepalives), a custom store round

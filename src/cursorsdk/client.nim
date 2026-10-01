@@ -5,7 +5,7 @@
 ## The bridge is started lazily on the first RPC and stopped by `close`.
 
 import std/[asyncdispatch, json, os, options, strutils]
-import bridge, connect, errors, types
+import bridge, connect, errors, types, version
 
 export options, types, errors
 export bridge.Bridge, bridge.BridgeInfo, bridge.hasExited, bridge.waitExit, bridge.outputTailText
@@ -26,15 +26,21 @@ type
       ## Explicit bridge executable. Empty: `CURSOR_SDK_BRIDGE_BIN`, cache, download.
     bridgeUrl*: string
       ## Attach to an already-running bridge instead of spawning one.
+      ## Must be set together with `bridgeToken`.
     bridgeToken*: string
       ## Bearer token for `bridgeUrl`.
+    bridgeArgs*: seq[string]
+      ## Extra command-line arguments appended to the bridge invocation
+      ## (`BridgeLaunchOptions.extraArgs`), e.g. `--max-concurrent-agents 4`.
+      ## For flags this package has no option for. Ignored for `bridgeUrl`.
     stateRoot*: string
     localStore*: Option[LocalAgentStoreConfig]
       ## Default store for every agent (`--local-store`).
     verbose*: bool
       ## Pass `--verbose` so the bridge logs every RPC to stderr.
     onBridgeOutput*: proc(line: string) {.gcsafe.}
-      ## Receives bridge stderr lines (diagnostics). Default: dropped.
+      ## Receives every bridge stderr/stdout line (merged; diagnostics)
+      ## except the discovery line. Default: dropped.
     startupTimeoutMs*: int       ## 0 → 30 000
     unaryTimeoutMs*: int
       ## Deadline for unary RPCs; 0 → 60 000. `WaitLiveRun` is exempt (it
@@ -49,8 +55,10 @@ type
     env*: seq[(string, string)]  ## extra bridge environment
     toolCallbackUrl*, toolCallbackToken*: string
       ## Launch-time custom-tool callback registration (see callbacks.nim).
+      ## Both or neither; setting only one is a `BridgeError` at start.
     storeCallbackUrl*, storeCallbackToken*: string
-      ## Launch-time store callback registration (custom stores).
+      ## Launch-time store callback registration (custom stores). Both or
+      ## neither, as above.
 
   Client* = ref object
     opts*: ClientOptions
@@ -100,6 +108,11 @@ proc requireApiKey*(c: Client): string =
   c.opts.apiKey
 
 proc startImpl(c: Client) {.async.} =
+  # Misconfiguration is reported here, before anything is spawned.
+  # `launchBridge` checks the callback pairs itself (protocol.md: supplying
+  # only one of a URL/token pair is a startup error); the attach pair is
+  # ours to check.
+  requirePair("bridgeUrl", c.opts.bridgeUrl, "bridgeToken", c.opts.bridgeToken)
   if c.opts.bridgeUrl.len > 0:
     c.bridge = attachBridge(c.opts.bridgeUrl, c.opts.bridgeToken)
   else:
@@ -115,12 +128,34 @@ proc startImpl(c: Client) {.async.} =
     lo.apiKey = c.opts.apiKey
     lo.verbose = c.opts.verbose
     lo.env = c.opts.env
+    lo.extraArgs = c.opts.bridgeArgs
     lo.startupTimeoutMs = c.opts.startupTimeoutMs
     lo.allowDownload = c.opts.allowDownload
     lo.onOutput = c.opts.onBridgeOutput
     c.bridge = await launchBridge(lo)
-  c.rpc = newConnectClient(c.bridge.url, c.bridge.token,
-                           unaryTimeoutMs = (if c.opts.unaryTimeoutMs > 0: c.opts.unaryTimeoutMs else: 60_000))
+  let rpc = newConnectClient(c.bridge.url, c.bridge.token,
+                             unaryTimeoutMs = (if c.opts.unaryTimeoutMs > 0: c.opts.unaryTimeoutMs else: 60_000))
+  # protocol.md: verify `GetVersion.protocol_version` after the handshake.
+  # `manifest.json` is only checked on download, so a `CURSOR_SDK_BRIDGE_BIN`
+  # override, a hand-copied cache, or an attached bridge is otherwise never
+  # protocol-checked. A mismatch (or a bridge that cannot answer) is fatal
+  # for this start; a managed process is shut down so it does not linger.
+  var ver: BridgeVersionInfo
+  try:
+    ver = parseBridgeVersionInfo(await rpc.unary(ControlService, "GetVersion", %*{}))
+  except CatchableError as e:
+    let b = c.bridge
+    c.bridge = nil
+    await b.shutdown()   # no-op when attached
+    raise e
+  if ver.protocolVersion != ProtocolVersion:
+    let b = c.bridge
+    c.bridge = nil
+    await b.shutdown()
+    raise (ref BridgeError)(msg: "bridge speaks protocol \"" & ver.protocolVersion &
+                                 "\" (bridge version \"" & ver.bridgeVersion & "\"), expected " &
+                                 ProtocolVersion)
+  c.rpc = rpc
   # A runtime tool callback does not survive a relaunch; re-register it.
   # (Launch-time callbacks come from `opts` and were passed on the command line.)
   # Uses `rpc` directly: `call` would wait on the start future we are inside.
@@ -136,9 +171,16 @@ proc start*(c: Client): Future[void] =
     f.fail((ref BridgeError)(msg: "client is closed"))
     return f
   if c.startFut.isNil:
-    c.startFut = c.startImpl()
+    let f = c.startImpl()
+    if f.failed:
+      # Failed before its first `await` (option validation). Do not cache
+      # it: the reset callback below only runs on the next dispatcher
+      # poll, and `await` on a finished future does not yield, so a caller
+      # retrying from the same async context would see the stale failure.
+      return f
+    c.startFut = f
     # Allow retry after a failed start.
-    c.startFut.callback = proc (f: Future[void]) =
+    f.callback = proc (f: Future[void]) =
       if f.failed: c.startFut = nil
   c.startFut
 

@@ -29,6 +29,13 @@ import types, errors, protobuf, client
 const
   ToolCallbackPath = "/sdk.v1.SdkCustomToolCallbackService/CallCustomTool"
   StoreCallbackPath = "/sdk.v1.SdkStoreCallbackService/CallStore"
+  DefaultCallbackMaxBody* = 64 * 1024 * 1024
+    ## Default `maxBody` for `newCallbackServer`. `std/asynchttpserver`'s
+    ## own default is 8 MiB, which a custom store's `checkpoints.create` /
+    ## `update` (a base64 conversation blob that grows with the agent) can
+    ## exceed on a long-lived agent. The server cannot default to
+    ## `BridgeInfo.maxMessageBytes`: it has to exist (and be bound) before
+    ## the bridge that would advertise that value is launched.
 
 type
   ToolContext* = object
@@ -62,10 +69,14 @@ proc randomToken(): string =
   result = base64.encode(bytes, safe = true)
   while result.len > 0 and result[^1] == '=': result.setLen(result.len - 1)
 
-proc newCallbackServer*(host = "127.0.0.1", port = Port(0)): CallbackServer =
+proc newCallbackServer*(host = "127.0.0.1", port = Port(0),
+                        maxBody = DefaultCallbackMaxBody): CallbackServer =
   ## Creates a server bound lazily by `start`. Port 0 picks an ephemeral port.
+  ## `maxBody` caps the `Content-Length` of a callback request; a larger
+  ## body is refused by `std/asynchttpserver` with a bare HTTP 413 before
+  ## any handler runs (chunked bodies are not subject to it).
   CallbackServer(host: host, port: port, authToken: randomToken(),
-                 server: newAsyncHttpServer(reuseAddr = true))
+                 server: newAsyncHttpServer(reuseAddr = true, maxBody = maxBody))
 
 # ---------------------------------------------------------------------------
 # Registration

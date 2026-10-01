@@ -190,7 +190,6 @@ proc parseProtoEnum[E: enum](n: JsonNode, key, prefix: string, default: E): E =
   else: default
 
 proc protoName(e: Runtime): string = RuntimePrefix & $e
-proc protoName(e: RunLifecycleStatus): string = RunLifecycleStatusPrefix & $e
 proc protoName(e: SettingSource): string = SettingSourcePrefix & $e
 proc protoName(e: HttpMcpTransportType): string = HttpMcpTransportTypePrefix & $e
 proc protoName(e: AgentModeOption): string = AgentModeOptionPrefix & $e

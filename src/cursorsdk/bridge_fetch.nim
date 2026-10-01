@@ -107,6 +107,12 @@ proc verifyManifest(dir: string) =
   let protocol = manifest.getOrDefault("protocol")
   if protocol.isNil or protocol.getStr != ProtocolVersion:
     raise bridgeError("bridge manifest protocol is " & $protocol & ", expected " & ProtocolVersion)
+  # versioning.md: release tags track `sdkVersion` one-to-one, so the
+  # archive attached to tag v<BridgeVersion> must carry that `sdkVersion`.
+  # (`bridgeVersion` is the bridge build's own number, e.g. "1.0.0".)
+  let sdkVersion = manifest.getOrDefault("sdkVersion")
+  if sdkVersion.isNil or sdkVersion.getStr != BridgeVersion:
+    raise bridgeError("bridge manifest sdkVersion is " & $sdkVersion & ", expected " & BridgeVersion)
 
 proc fetchBridge*(dir = defaultBridgeDir(), force = false,
                   log: proc(msg: string) {.gcsafe.} = nil): string =

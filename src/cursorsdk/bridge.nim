@@ -39,15 +39,20 @@ type
       ## `--workspace`. Empty: current directory.
     stateRoot*: string           ## `--state-root`
     localStore*: string          ## `--local-store` (LocalAgentStoreConfig JSON)
-    storeCallbackUrl*: string    ## `--store-callback-url`
+    storeCallbackUrl*: string    ## `--store-callback-url` (with the token, or neither)
     storeCallbackToken*: string  ## `--store-callback-auth-token`
-    toolCallbackUrl*: string     ## `--tool-callback-url`
+    toolCallbackUrl*: string     ## `--tool-callback-url` (with the token, or neither)
     toolCallbackToken*: string   ## `--tool-callback-auth-token`
     apiKey*: string
       ## Placed in the bridge environment as `CURSOR_API_KEY`. Empty: the
       ## caller's `CURSOR_API_KEY` is inherited if set.
     verbose*: bool               ## `--verbose`: log every RPC to stderr
     env*: seq[(string, string)]  ## extra environment entries
+    extraArgs*: seq[string]
+      ## Appended verbatim after the generated arguments, for flags without
+      ## a dedicated option (`--max-concurrent-agents`, `--max-message-bytes`;
+      ## see protocol.md). Not validated here; an unknown flag makes the
+      ## bridge exit before ready, with its usage text in `BridgeError.stderr`.
     startupTimeoutMs*: int       ## 0 → 30 000
     allowDownload*: bool         ## download the pinned release if missing (default true)
     onOutput*: proc(line: string) {.gcsafe.}
@@ -236,7 +241,24 @@ proc drain(b: Bridge): bool =
 # ---------------------------------------------------------------------------
 # Launch / attach
 
+proc requirePair*(urlName, url, tokenName, token: string) =
+  ## Raises `BridgeError` unless `url` and `token` are both set or both
+  ## empty. protocol.md: "Callback URL/token pairs must be provided together;
+  ## supplying only one is a startup error." Checked client-side so the
+  ## message names the option instead of surfacing as a bridge exit.
+  if (url.len > 0) != (token.len > 0):
+    let missing = if url.len > 0: tokenName else: urlName
+    raise (ref BridgeError)(msg: urlName & " and " & tokenName &
+                                 " must be set together (" & missing & " is empty)")
+
+proc validate(opts: BridgeLaunchOptions) =
+  requirePair("storeCallbackUrl", opts.storeCallbackUrl,
+              "storeCallbackToken", opts.storeCallbackToken)
+  requirePair("toolCallbackUrl", opts.toolCallbackUrl,
+              "toolCallbackToken", opts.toolCallbackToken)
+
 proc buildArgs(opts: BridgeLaunchOptions, workspace: string): seq[string] =
+  # Pairs are complete here: `validate` ran first.
   result = @["--workspace", workspace]
   if opts.stateRoot.len > 0: result.add ["--state-root", opts.stateRoot]
   if opts.localStore.len > 0: result.add ["--local-store", opts.localStore]
@@ -247,10 +269,13 @@ proc buildArgs(opts: BridgeLaunchOptions, workspace: string): seq[string] =
     result.add ["--tool-callback-url", opts.toolCallbackUrl,
                 "--tool-callback-auth-token", opts.toolCallbackToken]
   if opts.verbose: result.add "--verbose"
+  result.add opts.extraArgs
 
 proc launchBridge*(opts: BridgeLaunchOptions): Future[Bridge] {.async.} =
   ## Spawns the bridge and completes the handshake. The returned `Bridge`
-  ## has `url` and `token` set and is ready for RPCs.
+  ## has `url` and `token` set and is ready for RPCs. Raises `BridgeError`
+  ## before spawning if a callback URL/token pair is incomplete.
+  opts.validate()
   var exe = opts.exe
   if exe.len == 0:
     exe = locateBridge(allowDownload = opts.allowDownload,

@@ -31,6 +31,7 @@
 ## - `cursorsdk/types`    request/response types mirroring `sdk.v1`
 ## - `cursorsdk/errors`   `CursorError` hierarchy
 ## - `cursorsdk/callbacks` custom tool and store callback servers
+## - `cursorsdk/version`  pinned bridge release and protocol constants
 ## - `cursorsdk/bridge`   bridge process management (advanced)
 
 import cursorsdk/[client, agent, run, types, errors, callbacks, version]

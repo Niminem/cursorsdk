@@ -32,8 +32,14 @@ let verbose = getEnv("CURSOR_TEST_VERBOSE").len > 0
 # those deletes on Windows until upstream closes the store before rm.
 const deleteAfterRunWorks = not defined(windows)
 
+# Same helper as tests/t_bridge.nim (separate binaries; kept in sync by hand).
 when defined(windows):
-  proc killProcess(pid: int) = discard execShellCmd("taskkill /PID " & $pid & " /F >NUL 2>&1")
+  import std/winlean
+  proc killProcess(pid: int) =
+    let h = openProcess(PROCESS_TERMINATE, 0, DWORD(pid))
+    if h != 0:
+      discard terminateProcess(h, 1)
+      discard closeHandle(h)
 else:
   import std/posix
   proc killProcess(pid: int) = discard posix.kill(Pid(pid), SIGKILL)
@@ -223,6 +229,13 @@ else:
               return %*{"items": items}
             else: discard
           of "runEvents":
+            # ASSUMPTION, not specified upstream: services.md defines the
+            # *inputs* of `runEvents.append` / `runEvents.list` but not
+            # their output shapes. `{"offset": "<n>"}` and `{"events":
+            # [...]}` are guesses that bridge 1.0.35 has accepted without
+            # complaint (nothing below asserts on them). If a future bridge
+            # starts reading these, or `observe` on a custom-store run
+            # misbehaves, check here first.
             if meth == "append":
               events.add input
               return %*{"offset": $events.len}

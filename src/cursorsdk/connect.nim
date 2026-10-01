@@ -58,8 +58,17 @@ proc authHeaders(c: ConnectClient, contentType: string): seq[(string, string)] =
     ("Connect-Protocol-Version", ConnectProtocolVersion),
     ("Accept-Encoding", "identity")]
 
-proc unaryImpl(c: ConnectClient, service, meth: string, request: JsonNode): Future[JsonNode] {.async.} =
+type
+  ConnSlot = ref object
+    ## Lets `unary` reach the connection `unaryImpl` is using, so a fired
+    ## deadline can close it instead of leaving it open until the bridge
+    ## answers or goes away.
+    conn: HttpConnection
+
+proc unaryImpl(c: ConnectClient, service, meth: string, request: JsonNode,
+               slot: ConnSlot): Future[JsonNode] {.async.} =
   let conn = await connectHttp(c.host, c.port)
+  slot.conn = conn
   defer: conn.close()
   let body = if request.isNil: "{}" else: $request
   await conn.sendRequest("POST", rpcPath(service, meth), c.hostHeader,
@@ -83,13 +92,17 @@ proc unary*(c: ConnectClient, service, meth: string, request: JsonNode = nil,
   ## `timeoutMs`: negative → the client's `unaryTimeoutMs`; `0` → no
   ## deadline (for RPCs that block for as long as a run takes, such as
   ## `WaitLiveRun`).
-  let fut = c.unaryImpl(service, meth, request)
+  let slot = ConnSlot()
+  let fut = c.unaryImpl(service, meth, request, slot)
   let deadline = if timeoutMs < 0: c.unaryTimeoutMs else: timeoutMs
   if deadline > 0:
     let completed = await fut.withTimeout(deadline)
     if not completed:
-      # Let the underlying future settle later without crashing the loop.
+      # Let the underlying future settle later without crashing the loop,
+      # and drop the socket now so a hung bridge does not pin it (the
+      # pending read fails into `fut`, which the callback swallows).
       fut.callback = proc (f: Future[JsonNode]) = discard f.failed
+      slot.conn.close()   # nil-safe; nil if the connect itself is hung
       raise (ref TransportError)(msg: service & "/" & meth & ": timed out after " &
                                       $deadline & " ms")
   result = await fut

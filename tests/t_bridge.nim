@@ -4,7 +4,7 @@
 ## The bridge is resolved via `CURSOR_SDK_BRIDGE_BIN`, the user cache, or a
 ## download of the pinned release.
 
-import std/[unittest, asyncdispatch, asyncnet, json, options, strutils, os, net, tables]
+import std/[unittest, asyncdispatch, asyncnet, asynchttpserver, json, options, strutils, os, net, tables]
 import cursorsdk
 import cursorsdk/[connect, http, protobuf, bridge]
 
@@ -31,6 +31,7 @@ suite "bridge lifecycle":
     proc run() {.async.} =
       var opts = initBridgeLaunchOptions()
       opts.workspace = getTempDir()
+      opts.extraArgs = @["--max-concurrent-agents", "3"]   # advertised back on the ready line
       opts.onOutput = proc(line: string) {.gcsafe.} =
         doAssert not line.startsWith("cursor-sdk-bridge ready"), "discovery line must not be forwarded"
       let b = await launchBridge(opts)
@@ -39,6 +40,7 @@ suite "bridge lifecycle":
       check b.url.startsWith("http://127.0.0.1:")
       check b.token.len > 0
       check b.info.schemaVersion == 1
+      check b.info.maxConcurrentAgents == some(3)
       let rpc = newConnectClient(b.url, b.token)
       let pong = await rpc.unary("SdkBridgeControlService", "Ping")
       check pong["message"].getStr == "pong"
@@ -201,6 +203,88 @@ suite "client":
       let c = newClient(o)
       expect AuthError:
         discard c.requireApiKey()
+    waitFor run()
+
+  test "incomplete URL/token pairs are rejected before anything is spawned":
+    proc run() {.async.} =
+      proc rejected(o: ClientOptions, needle: string) {.async.} =
+        let c = newClient(o)
+        try:
+          await c.start()
+          check false
+        except BridgeError as e:
+          check needle in e.msg
+          check "must be set together" in e.msg
+        check not c.isStarted
+        check c.bridge.isNil            # nothing was attached or launched
+        # A failed start is retryable, not sticky.
+        c.opts.bridgeUrl = ""
+        c.opts.bridgeToken = ""
+        c.opts.toolCallbackUrl = ""
+        c.opts.toolCallbackToken = ""
+        c.opts.storeCallbackUrl = ""
+        c.opts.storeCallbackToken = ""
+        check (await c.ping()) == "pong"
+        await c.close()
+      var base = initClientOptions()
+      base.workspace = getTempDir()
+      base.apiKey = "unused-here"
+      var o1 = base
+      o1.bridgeUrl = "http://127.0.0.1:1"      # token missing
+      await rejected(o1, "bridgeToken")
+      var o2 = base
+      o2.toolCallbackUrl = "http://127.0.0.1:1/tools"
+      await rejected(o2, "toolCallbackToken")
+      var o3 = base
+      o3.storeCallbackToken = "tok"            # URL missing
+      await rejected(o3, "storeCallbackUrl")
+      # The lower-level launcher enforces the same rule.
+      var lo = initBridgeLaunchOptions()
+      lo.workspace = getTempDir()
+      lo.toolCallbackToken = "tok"
+      expect BridgeError:
+        discard await launchBridge(lo)
+    waitFor run()
+
+  test "GetVersion protocol mismatch is a BridgeError":
+    # A fake bridge that answers every RPC with a GetVersionResponse for a
+    # protocol this client does not speak. Attach to it: the start must
+    # fail before any other RPC and leave the client restartable.
+    proc run() {.async.} =
+      let fake = newAsyncHttpServer(reuseAddr = true)
+      fake.listen(Port(0), "127.0.0.1")
+      var paths: seq[string]
+      proc answer(req: Request) {.async, gcsafe.} =
+        {.cast(gcsafe).}: paths.add req.url.path
+        await req.respond(Http200,
+          $(%*{"bridgeVersion": "9.9.9", "protocolVersion": "sdk.v2", "capabilities": []}),
+          newHttpHeaders({"Content-Type": "application/json"}))
+      proc serve() {.async.} =
+        while true:
+          try:
+            if fake.shouldAcceptRequest(): await fake.acceptRequest(answer)
+            else: await sleepAsync(10)
+          except CatchableError:
+            break                       # socket closed below
+      let loop = serve()
+      var o = initClientOptions()
+      o.bridgeUrl = "http://127.0.0.1:" & $fake.getPort
+      o.bridgeToken = "fake"
+      let c = newClient(o)
+      try:
+        discard await c.ping()
+        check false
+      except BridgeError as e:
+        check "sdk.v2" in e.msg
+        check "9.9.9" in e.msg
+        check ProtocolVersion in e.msg
+      check not c.isStarted
+      check paths == @["/sdk.v1.SdkBridgeControlService/GetVersion"]
+      # Same outcome on a retry (the failed start is not cached).
+      expect BridgeError:
+        await c.start()
+      fake.close()
+      discard await loop.withTimeout(2_000)
     waitFor run()
 
 suite "callback server":
