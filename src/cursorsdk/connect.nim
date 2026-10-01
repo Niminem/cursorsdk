@@ -25,7 +25,8 @@ type
     hostHeader: string
     token*: string
     unaryTimeoutMs*: int
-      ## Deadline for unary RPCs. Default 60 s. Streams have no deadline.
+      ## Default deadline for unary RPCs (60 s). Streams have no deadline,
+      ## and individual calls can override it via `unary`'s `timeoutMs`.
 
   ConnectStream* = ref object
     ## A server-stream in progress. Call `next` until it returns `none`.
@@ -75,17 +76,22 @@ proc unaryImpl(c: ConnectClient, service, meth: string, request: JsonNode): Futu
     raise (ref TransportError)(msg: service & "/" & meth & ": response is not JSON: " &
                                     respBody[0 ..< min(respBody.len, 200)])
 
-proc unary*(c: ConnectClient, service, meth: string, request: JsonNode = nil): Future[JsonNode] {.async.} =
+proc unary*(c: ConnectClient, service, meth: string, request: JsonNode = nil,
+            timeoutMs = -1): Future[JsonNode] {.async.} =
   ## Performs a unary RPC. Raises `RpcError` (or a subclass) on a Connect
   ## error, `TransportError` on connection problems or deadline expiry.
+  ## `timeoutMs`: negative → the client's `unaryTimeoutMs`; `0` → no
+  ## deadline (for RPCs that block for as long as a run takes, such as
+  ## `WaitLiveRun`).
   let fut = c.unaryImpl(service, meth, request)
-  if c.unaryTimeoutMs > 0:
-    let completed = await fut.withTimeout(c.unaryTimeoutMs)
+  let deadline = if timeoutMs < 0: c.unaryTimeoutMs else: timeoutMs
+  if deadline > 0:
+    let completed = await fut.withTimeout(deadline)
     if not completed:
       # Let the underlying future settle later without crashing the loop.
       fut.callback = proc (f: Future[JsonNode]) = discard f.failed
       raise (ref TransportError)(msg: service & "/" & meth & ": timed out after " &
-                                      $c.unaryTimeoutMs & " ms")
+                                      $deadline & " ms")
   result = await fut
 
 proc frame(payload: string, flags: uint8 = 0): string =

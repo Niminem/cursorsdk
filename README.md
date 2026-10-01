@@ -3,7 +3,7 @@
 Cursor SDK Bridge client for the Nim programming language.
 
 Drive [Cursor agents](https://cursor.com/docs/sdk) from Nim through
-`[cursor-sdk-bridge](https://github.com/cursor/sdk-bridge)`: a small local
+[`cursor-sdk-bridge`](https://github.com/cursor/sdk-bridge): a small local
 process that embeds Cursor's TypeScript SDK and exposes it over the stable
 `sdk.v1` Connect protocol. This package locates (or downloads) the bridge,
 spawns it, handles the handshake and authentication, and wraps the agent
@@ -95,19 +95,15 @@ or `opts.local.autoReview = some(true)` (see [Agent options](#agent-options)).
 returns the ids, parameters, and preset variants available to your account.
 `createAgent` rejects unknown ids with a `ValidationError` listing valid ones.
 
-
-
 ## API overview
-
 
 | Type             | Role                                                                                                                                                                                                 |
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Client`         | Owns the bridge process and transport. Typed low-level RPCs for every `SdkAgentService`, `SdkCursorService`, and `SdkBridgeControlService` method, plus `call`/`stream` escape hatches for raw JSON. |
-| `Agent`          | `createAgent` / `resumeAgent`; `send` → `Run`; `id`, `model`, `cwd`; `info`, `reload`, `close`, `archive`, `unarchive`, `delete(force)`, `runs`, `messages`, `usage`.                                |
+| `Client`         | Owns the bridge process and transport. Typed low-level RPCs for every `SdkAgentService`, `SdkCursorService`, and `SdkBridgeControlService` method, plus `call`/`stream` escape hatches for raw JSON. `relaunches` counts bridge relaunches. |
+| `Agent`          | `createAgent` / `resumeAgent`; `send` → `Run`; `id`, `model`, `cwd`; `info`, `reload`, `close`, `archive`, `unarchive`, `delete(force)`, `cancelNonTerminalRuns`, `runs`, `messages`, `usage`.      |
 | `Run`            | `next` (events), `nextText` (assistant text), `wait` (terminal `RunResult`), `text`, `failed`, `raiseIfFailed`, `observe` (re-attach after a dropped stream), `cancel`, `close`, `keepalives`.       |
 | `CallbackServer` | Loopback server for custom tools (`registerTool`) and custom stores (`setStoreHandler`).                                                                                                             |
-| `ClientOptions`  | API key, workspace, bridge path/URL/token, state root, default store, callback endpoints, verbose logging, startup/RPC timeouts, `allowDownload`, `autoRelaunch` / `onBridgeRelaunch`.               |
-
+| `ClientOptions`  | API key, workspace, bridge path/URL/token, state root, default store, callback endpoints, extra bridge `env`, `verbose` / `onBridgeOutput` logging, startup/RPC timeouts, `allowDownload`, `autoRelaunch` / `onBridgeRelaunch`. |
 
 Mapping to first-party names where they differ: `Agent.create` →
 `client.createAgent`, `Agent.resume` → `client.resumeAgent`, `run.stream()`
@@ -194,8 +190,8 @@ let agent = await client.createAgent(opts)
 `tools` and `disallowedTools` take the SDK's public tool vocabulary (`read`,
 `edit`, `grep`, `glob`, `ls`, `shell`, `mcp`, `task`, `webSearch`, ...);
 unknown names fail `createAgent` with a `ValidationError` that lists the
-valid ones. `some(@[])` offers no built-in tools at all; deny wins when both
-are set.
+valid ones. `some(newSeq[string]())` offers no built-in tools at all; deny
+wins when both are set.
 
 `AgentOptions.extra` and `SendOptions.extra` merge raw JSON into the request
 for fields this package does not model. `apiKey` defaults to the client key
@@ -240,8 +236,9 @@ and the `enableDeltas` / `enableSteps` switches described below.
 ### Streaming
 
 `Run.next` yields `RunEvent`s and skips keepalives (counted in
-`run.keepalives`) and unknown envelope cases. Dispatch on `kind` and, for `rekMessage`, on `msgType` (`system`,
-`assistant`, `thinking`, `tool_call`, `status`, `usage`, ...). Payloads are
+`run.keepalives`) and unknown envelope cases. Dispatch on `kind` and, for
+`rekMessage`, on `msgType` (`system`, `assistant`, `thinking`, `tool_call`,
+`status`, `usage`, ...). Payloads are
 `JsonNode`s matching the public SDK's message shapes; accessors cover the
 common ones: `assistantText`, `thinkingText`, `toolCallName`,
 `toolCallStatus`, `tokenUsage`, `statusMessage`, `runId`, `agentId`. The
@@ -275,9 +272,11 @@ Opt into raw deltas or completed steps with
 arrive as `rekInteractionUpdate` / `rekStep` events.
 
 Dropping a stream never cancels the run. `run.wait()` falls back to
-`WaitLiveRun` if the connection drops, `run.observe()` re-attaches to the
-durable event log (replaying from the start unless this run itself came from
-`observe`), and `client.observeRun(runId)` does the same from a bare id.
+`WaitLiveRun` if the connection drops (that RPC is exempt from the unary
+timeout, since a run can outlast the 60 s default), `run.observe()`
+re-attaches to the durable event log (replaying from the start unless this
+run itself came from `observe`), and `client.observeRun(runId)` does the same
+from a bare id.
 `run.cancel()` requests cancellation; the stream still ends with a
 `CANCELLED` result followed by `done`.
 
@@ -387,8 +386,9 @@ Windows 10+, and Linux. Compile with `-d:ssl` to download with
 `std/httpclient` instead. Set `ClientOptions.allowDownload = false` to fail
 instead of downloading.
 
-The bridge binds `127.0.0.1` on an ephemeral port. Its stderr is drained by a
-dedicated thread (so a full pipe never blocks it) and forwarded to
+The bridge binds `127.0.0.1` on an ephemeral port. Its stderr and stdout are
+merged and drained by a dedicated thread (so a full pipe never blocks it) and
+forwarded line by line to
 `ClientOptions.onBridgeOutput`. The discovery line is never forwarded or
 logged. On `client.close()` the bridge receives a `Shutdown` RPC, is given
 5 seconds, then killed; an exit handler kills any bridge still alive when
@@ -397,17 +397,17 @@ the host process ends. The bridge is launched with
 
 ## Debugging
 
-- `ClientOptions.verbose = true` makes the bridge log each RPC's name,
-outcome, duration, and full error to stderr (via `onBridgeOutput`).
-Request and response payloads are never logged.
+- `ClientOptions.verbose = true` passes `--verbose` so the bridge logs each
+RPC's name, outcome, duration, and full error to stderr (via
+`onBridgeOutput`). Request and response payloads are never logged. The flag
+is accepted by bridge 1.0.35 but is not listed in the upstream CLI table in
+[docs/protocol.md](vendor/sdk-bridge/docs/protocol.md).
 - `BridgeError.stderr` and `client.bridge.outputTailText()` hold the last
 bridge output when startup fails.
 - When an RPC fails and you suspect this package rather than the bridge or
 your key, run the curl-only sequence in
-`[docs/smoke-test.md](vendor/sdk-bridge/docs/smoke-test.md)` against the
+[docs/smoke-test.md](vendor/sdk-bridge/docs/smoke-test.md) against the
 cached binary; it answers "is it me or the bridge?" with no adapter code.
-
-
 
 ## Notes on this bridge release
 
@@ -448,8 +448,6 @@ one `TransportError` on any stream open at the time or any RPC racing the
 crash, and the loss of other runs that were in progress on that bridge. Set
 `onBridgeRelaunch` if you want to log it. macOS/Linux are not affected.
 
-
-
 ## Scope and support
 
 Cursor publishes and supports the `sdk.v1` contract and the bridge binaries;
@@ -479,8 +477,10 @@ nimble test
 
 - `tests/t_codecs.nim`: pure unit tests (no network).
 - `tests/t_bridge.nim`: spawns a real bridge, exercises handshake, auth,
-streaming errors, shutdown, and the callback server. Needs the bridge
-binary (downloaded if absent) but no API key.
+streaming errors, shutdown, attaching to an external bridge, auto-relaunch
+after the process is killed (and the opt-out), and the callback server
+(JSON, binary protobuf, chunked bodies). Needs the bridge binary
+(downloaded if absent) but no API key.
 - `tests/t_live.nim`: full turns against Cursor's API, including a custom
 tool round trip with a >15 s tool pause (keepalives), a custom store round
 trip, cancellation (on its own bridge, verifying auto-relaunch if the bridge
@@ -489,8 +489,6 @@ recovers), observe/replay, `delete(force = true)`, and agent lifecycle. Runs
 only when `CURSOR_API_KEY` is set (or present in a gitignored `.env`).
 Spends real requests. On Windows, post-run `delete()` assertions are
 skipped (printed as `skipped`) because of the bridge `EBUSY` bug above.
-
-
 
 ## License
 

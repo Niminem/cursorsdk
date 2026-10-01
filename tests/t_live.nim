@@ -304,6 +304,9 @@ else:
           await run.cancel()
           let res = await run.wait()
           echo "  status after cancel: ", res.status
+          # FINISHED is allowed: cancellation is cooperative, so a run that
+          # was already wrapping up when CancelRun was accepted can still
+          # reach FINISHED before the cancel takes effect.
           check res.status in {rlsCancelled, rlsFinished}
           await sleepAsync(1_500)   # the post-cancel crash lands within ~1 s
           let crashed = cancelClient.bridge != nil and cancelClient.bridge.hasExited

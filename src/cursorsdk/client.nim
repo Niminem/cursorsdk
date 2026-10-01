@@ -36,7 +36,9 @@ type
     onBridgeOutput*: proc(line: string) {.gcsafe.}
       ## Receives bridge stderr lines (diagnostics). Default: dropped.
     startupTimeoutMs*: int       ## 0 → 30 000
-    unaryTimeoutMs*: int         ## 0 → 60 000
+    unaryTimeoutMs*: int
+      ## Deadline for unary RPCs; 0 → 60 000. `WaitLiveRun` is exempt (it
+      ## blocks for as long as the run takes), as are streams.
     allowDownload*: bool         ## default true
     autoRelaunch*: bool
       ## Default true. If the managed bridge exits unexpectedly, the next
@@ -179,10 +181,12 @@ proc close*(c: Client, graceSeconds = 0, timeoutMs = 5_000) {.async.} =
 # ---------------------------------------------------------------------------
 # Raw access
 
-proc call*(c: Client, service, meth: string, request: JsonNode = nil): Future[JsonNode] {.async.} =
+proc call*(c: Client, service, meth: string, request: JsonNode = nil,
+           timeoutMs = -1): Future[JsonNode] {.async.} =
   ## Unary RPC escape hatch: `await client.call("SdkAgentService", "GetAgent", %*{...})`.
+  ## `timeoutMs`: negative → `ClientOptions.unaryTimeoutMs`; `0` → no deadline.
   await c.ensure()
-  result = await c.rpc.unary(service, meth, request)
+  result = await c.rpc.unary(service, meth, request, timeoutMs)
 
 proc stream*(c: Client, service, meth: string, request: JsonNode = nil): Future[ConnectStream] {.async.} =
   ## Server-stream RPC escape hatch.
@@ -318,8 +322,10 @@ proc observeRunRaw*(c: Client, runId: string, afterOffset = ""): Future[ConnectS
   result = await c.stream(AgentService, "ObserveRun", req)
 
 proc waitLiveRun*(c: Client, runId: string): Future[RunResult] {.async.} =
-  ## Blocks until the run is terminal and returns its result.
-  let r = await c.call(AgentService, "WaitLiveRun", %*{"runId": runId})
+  ## Blocks until the run is terminal and returns its result. Exempt from
+  ## the unary timeout: a run can take far longer than 60 s, and cutting
+  ## this call short would turn `Run.wait`'s recovery path into a failure.
+  let r = await c.call(AgentService, "WaitLiveRun", %*{"runId": runId}, timeoutMs = 0)
   result = parseRunResult(jObj(r, "result"))
 
 proc getRun*(c: Client, runId: string, agentId = "", cwd = ""): Future[RunSnapshot] {.async.} =

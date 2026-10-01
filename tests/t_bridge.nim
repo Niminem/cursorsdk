@@ -20,9 +20,7 @@ suite "bridge lifecycle":
     proc run() {.async.} =
       var opts = initBridgeLaunchOptions()
       opts.workspace = getTempDir()
-      var sawOutput = false
       opts.onOutput = proc(line: string) {.gcsafe.} =
-        sawOutput = true
         doAssert not line.startsWith("cursor-sdk-bridge ready"), "discovery line must not be forwarded"
       let b = await launchBridge(opts)
       check b.managed
@@ -42,7 +40,6 @@ suite "bridge lifecycle":
       when not defined(windows):
         check not pidAlive(pid)
       await b.shutdown()  # idempotent
-      discard sawOutput
     waitFor run()
 
   test "bad executable surfaces a BridgeError":
