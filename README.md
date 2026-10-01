@@ -30,7 +30,8 @@ Not yet in the Nimble package index. Until it is, install from source:
 
 ```sh
 git clone --recursive https://github.com/Niminem/cursorsdk   # --recursive pulls the vendored sdk-bridge protocol docs
-cd cursorsdk && nimble install
+cd cursorsdk
+nimble install
 ```
 
 Once published: `nimble install cursorsdk`.
@@ -388,6 +389,22 @@ with `status: "queued"` during `CreateAgent`).
 `downloadArtifact` are likewise cloud-only.
 - `createAgent` validates the model against the catalog, so it needs a
 working API key and network even though the agent runs locally.
+- **Windows: `agent.delete()` fails for any agent that has run a turn.** The
+bridge keeps each agent's SQLite store (`agents/<id>/store.db` + WAL) open
+for the life of the process and `DeleteAgent` removes the directory without
+closing it. POSIX allows unlinking open files; Windows refuses with
+`InternalError` ("EBUSY: resource busy or locked, rm …"). `close()`,
+`archive()`, and waiting do not release the handle. The agent stays
+registered, and the delete succeeds from a fresh bridge process (restart the
+client, then delete). Agents that never ran have no `store.db` yet, so
+`delete(force = true)` on a fresh agent works everywhere.
+- **Cancelling a run early in its life crashes the bridge** (Bun "Internal
+assertion failure", exit code 3; every later RPC then fails with
+"connection closed" or "connection refused"). The window is wider than the
+first event: a `thinking` start frame can arrive within tens of ms on a warm
+agent and cancelling there still crashes. Before calling `run.cancel()`, wait
+until real text (`assistantText` / `thinkingText`) has streamed and at least
+a second has passed. This narrows the race; it does not eliminate it.
 
 
 

@@ -6,7 +6,8 @@
 ## falling back to the first model from `ListModels`). Set
 ## `CURSOR_TEST_VERBOSE=1` to print every stream event.
 
-import std/[unittest, asyncdispatch, json, options, strutils, os, sets, tables]
+import std/[unittest, asyncdispatch, json, options, strutils, os, sets, tables,
+            monotimes, times]
 import cursorsdk
 
 proc loadApiKey(): string =
@@ -22,6 +23,14 @@ proc loadApiKey(): string =
 
 let apiKey = loadApiKey()
 let verbose = getEnv("CURSOR_TEST_VERBOSE").len > 0
+
+# cursor-sdk-bridge 1.0.35 keeps each agent's SQLite store (store.db + WAL)
+# open for the life of the process, and DeleteAgent removes the agent's
+# directory without closing it first. POSIX allows unlinking open files, so
+# macOS/Linux are fine; Windows refuses with EBUSY for any agent that has
+# run a turn, and the bridge can later crash (Bun internal assertion). Skip
+# those deletes on Windows until upstream closes the store before rm.
+const deleteAfterRunWorks = not defined(windows)
 
 if apiKey.len == 0:
   echo "t_live: CURSOR_API_KEY not set; skipping live tests"
@@ -167,7 +176,10 @@ else:
         check sawToolCall
         check run.keepalives >= 1      # the pause really crossed the keepalive interval
         check "4242" in res.text
-        await toolAgent.delete()
+        if deleteAfterRunWorks:
+          await toolAgent.delete()
+        else:
+          echo "  skipped delete (bridge EBUSY bug on Windows)"
       waitFor run()
 
     test "custom store round trip":
@@ -258,8 +270,17 @@ else:
       proc run() {.async.} =
         let run = await agent.send(
           "Write a very long essay (at least 3000 words) about the history of compilers.")
-        # Wait for the first event so the run id is known, then cancel.
-        discard await run.next()
+
+        # Bridge 1.0.35 crashes (Bun assertion, exit 3) if CancelRun lands
+        # early in a run's life. Only cancel once real text has streamed
+        # for >= 1 s; a bare `thinking` start frame arrives too soon.
+        let t0 = getMonoTime()
+        while true:
+          let ev = await run.next()
+          if ev.isNone: break
+          let e = ev.get
+          let gotText = e.assistantText.len > 0 or e.thinkingText.len > 0
+          if gotText and getMonoTime() - t0 >= initDuration(seconds = 1): break
         check run.runId.len > 0
         await run.cancel()
         let res = await run.wait()
@@ -305,18 +326,23 @@ else:
         for a in page.items:
           if a.agentId == agent.id: found = true
         check found
-        await agent.delete()
-        expect RpcError:
-          discard await client.getAgent(agent.id)
+        if deleteAfterRunWorks:
+          await agent.delete()
+          expect RpcError:
+            discard await client.getAgent(agent.id)
+        else:
+          echo "  skipped delete (bridge EBUSY bug on Windows)"
       waitFor run()
 
     test "shutdown":
-      # If the bridge died mid-suite, every test after that point failed
-      # with "Connection refused"; its last output is the only evidence.
-      if client.bridge != nil and client.bridge.hasExited:
-        echo "  bridge exited early with code ", client.bridge.exitCode
+      # A bridge that died mid-suite explains any "connection refused"
+      # failures above; print its last output and fail here too.
+      let diedEarly = client.bridge != nil and client.bridge.hasExited
+      if diedEarly:
+        echo "  !! bridge exited early with code ", client.bridge.exitCode
         echo "  --- bridge output tail ---"
         echo client.bridge.outputTailText()
         echo "  --------------------------"
       waitFor client.close()
+      check not diedEarly
       check client.bridge.hasExited
