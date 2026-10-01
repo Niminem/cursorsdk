@@ -311,5 +311,12 @@ else:
       waitFor run()
 
     test "shutdown":
+      # If the bridge died mid-suite, every test after that point failed
+      # with "Connection refused"; its last output is the only evidence.
+      if client.bridge != nil and client.bridge.hasExited:
+        echo "  bridge exited early with code ", client.bridge.exitCode
+        echo "  --- bridge output tail ---"
+        echo client.bridge.outputTailText()
+        echo "  --------------------------"
       waitFor client.close()
       check client.bridge.hasExited

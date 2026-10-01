@@ -89,10 +89,16 @@ proc prompt*(c: Client, text: string, model: string, cwd = "",
   ## return the terminal `RunResult` (`.text` is the final assistant text).
   ## Raises `RunError` if the run ends in `ERROR`, `CANCELLED`, or `EXPIRED`.
   let agent = await c.createAgent(model, cwd)
+  # No `await` inside a `finally`: with an exception in flight, Nim's async
+  # transform can yield a nil future there and replace the real error with
+  # an AssertionDefect. Capture, clean up, then re-raise instead.
+  var pending: ref CatchableError
   try:
     let run = await agent.send(text, options)
     result = await run.wait()
     run.raiseIfFailed()
-  finally:
-    try: await agent.close()
-    except CatchableError: discard
+  except CatchableError as e:
+    pending = e
+  try: await agent.close()
+  except CatchableError: discard
+  if pending != nil: raise pending
