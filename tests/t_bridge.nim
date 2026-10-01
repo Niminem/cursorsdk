@@ -53,17 +53,24 @@ suite "bridge lifecycle":
   test "process that exits before ready reports its output":
     proc run() {.async.} =
       var opts = initBridgeLaunchOptions()
+      opts.startupTimeoutMs = 5_000  # fail fast if the child lingers
       when defined(windows):
-        opts.exe = findExe("cmd")
+        # whoami rejects the `--workspace` arg buildArgs always appends:
+        # "ERROR: Invalid argument/option" and exit 1. Unlike cmd.exe it
+        # never falls back to reading stdin.
+        opts.exe = findExe("whoami")
         opts.env = @[]
       else:
+        # sh (bash/zsh/dash/busybox) rejects `--workspace` as an illegal
+        # option and exits 2.
         opts.exe = findExe("sh")
-      # `sh` with no stdin exits immediately; the bridge manager must notice.
+      doAssert opts.exe.len > 0, "test helper executable not found on PATH"
       try:
         discard await launchBridge(opts)
         check false
       except BridgeError as e:
         check "before becoming ready" in e.msg
+        check e.stderr.len > 0  # the child's error output was captured
     waitFor run()
 
 suite "client":

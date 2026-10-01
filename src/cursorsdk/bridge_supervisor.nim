@@ -61,6 +61,12 @@ proc supervisorMain(cfg: SupervisorConfig) {.thread.} =
     cfg.post(BridgeEvent(kind: bekSpawnFailed, error: getCurrentExceptionMsg()))
     return
   cfg.post(BridgeEvent(kind: bekSpawned, pid: p.processID))
+  # The bridge never reads stdin (shutdown is via RPC or SIGINT/SIGTERM).
+  # Close our write end so a child that *does* read stdin sees EOF instead
+  # of blocking forever on a pipe nobody writes to. Safe to double-close:
+  # osproc invalidates the handle so Process.close skips it.
+  try: p.inputStream.close()
+  except IOError, OSError: discard
   let output = p.outputStream
   var line: string
   try:
