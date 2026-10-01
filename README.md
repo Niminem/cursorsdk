@@ -84,10 +84,12 @@ let res = await client.prompt("Reply with one word: ready?", model = "composer-2
 echo res.text, " (", res.durationMs, " ms)"
 ```
 
-The fragments in the rest of this README omit their imports. Besides
-`std/asyncdispatch` and `cursorsdk` they need `std/json` (`JsonNode`, `%*`)
-and `std/tables` (the `mcpServers` / `customTools` tables); `Option` helpers
-such as `some` come with `cursorsdk`.
+The fragments in the rest of this README omit their imports and assume
+they run inside an `{.async.}` proc. `import std/asyncdispatch` and
+`import cursorsdk` are all they need: `cursorsdk` re-exports `std/json`
+(`JsonNode`, `%*`), `std/tables` (the `mcpServers` / `customTools` tables),
+and `std/options` (`some`, `isNone`, ...). Every fragment is compiled by
+`tests/t_readme.nim`.
 
 Two things to know before running anything larger:
 
@@ -104,7 +106,7 @@ returns the ids, parameters, and preset variants available to your account.
 
 | Type             | Role                                                                                                                                                                                                 |
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Client`         | Owns the bridge process and transport. Typed low-level RPCs for every `SdkAgentService`, `SdkCursorService`, and `SdkBridgeControlService` method (`Shutdown` is issued by `close`), plus `call`/`stream` escape hatches for raw JSON. `relaunches` counts bridge relaunches. |
+| `Client`         | Owns the bridge process and transport. Typed low-level RPCs for every `SdkAgentService`, `SdkCursorService`, and `SdkBridgeControlService` method (`Shutdown` is issued by `close`), plus `call`/`stream` escape hatches for raw JSON. `relaunches` counts bridge relaunches; `maxConcurrentAgents` / `loadedAgents` expose the advertised agent limit and this client's loaded count. |
 | `Agent`          | `createAgent` / `resumeAgent`; `send` → `Run`; `id`, `model`, `cwd`; `info`, `reload`, `close`, `archive`, `unarchive`, `delete(force)`, `cancelNonTerminalRuns`, `runs`, `messages`, `usage`.      |
 | `Run`            | `next` (events), `nextText` (assistant text), `wait` (terminal `RunResult`), `text`, `failed`, `raiseIfFailed`, `observe` (re-attach after a dropped stream), `cancel`, `close`, `keepalives`.       |
 | `CallbackServer` | Loopback server for custom tools (`registerTool`) and custom stores (`setStoreHandler`).                                                                                                             |
@@ -137,11 +139,23 @@ that have no environment variable (`--max-concurrent-agents`,
 `--max-message-bytes`); an unknown flag makes the bridge exit before it is
 ready, with its usage text in `BridgeError.stderr`.
 
+When the bridge advertises `maxConcurrentAgents` (it does so only if you
+pass `--max-concurrent-agents`), this client enforces it: `createAgent` and
+`resumeAgent` raise `RateLimitError` once `client.loadedAgents` equals
+`client.maxConcurrentAgents.get`. `loadedAgents` counts the agents this
+client created or resumed on the current bridge process and has not yet
+`close`d or `delete`d; re-resuming a loaded agent does not take a second
+slot, and the count resets when the bridge is relaunched. It is the
+client's own bookkeeping: agents loaded through the raw `call` escape
+hatch, or by another client attached to the same bridge, are not counted.
+The bridge itself does not enforce the limit (see "Notes on this bridge
+release").
+
 Attach to a bridge you already run (tests, hosts that manage the process):
 
 ```nim
 o.bridgeUrl = "http://127.0.0.1:49152"
-o.bridgeToken = readFile("/path/to/auth-token").strip
+o.bridgeToken = readFile("/path/to/auth-token").strip   # strip: std/strutils
 ```
 
 Attached bridges are not shut down by `client.close()`. Nothing is spawned
@@ -175,9 +189,11 @@ launch-time callback URLs are passed again on the command line, and your
 
 What is lost: runs that were in progress on the dead bridge. Local runs
 execute inside the bridge, so they die with it. `next()` fails with
-`TransportError`; `wait()` detects that the bridge exited and raises
-`TransportError` ("run … lost") rather than falling back to `WaitLiveRun`
-for a run the new bridge never had; `observe()` replays what was recorded
+`TransportError`; `wait()` detects that the bridge exited (allowing up to
+1.5 s for the exit to be reported, since the socket error can arrive
+first) and raises `TransportError` ("run … lost") rather than falling back
+to `WaitLiveRun` for a run the new bridge never had; `observe()` replays
+what was recorded
 but never sees a terminal `result`. Continue by calling `send()` again. An RPC that
 races the crash can also fail once with `TransportError` before the exit is
 noticed; the one after it relaunches.
@@ -460,6 +476,10 @@ with `status: "queued"` during `CreateAgent`).
 `downloadArtifact` are likewise cloud-only.
 - `createAgent` validates the model against the catalog, so it needs a
 working API key and network even though the agent runs locally.
+- `--max-concurrent-agents` is advertised on the ready line but not
+enforced: a second `CreateAgent` against a limit of 1 succeeds. This
+package enforces the advertised value client-side (see
+[Client options](#client-options)). A value of `0` is rejected at startup.
 - **Windows: `agent.delete()` fails for any agent that has run a turn.** The
 bridge keeps each agent's SQLite store (`agents/<id>/store.db` + WAL) open
 for the life of the process and `DeleteAgent` removes the directory without
@@ -509,17 +529,20 @@ nimble test
 ```
 
 - `tests/t_codecs.nim`: pure unit tests (no network).
+- `tests/t_readme.nim`: compile-only check of every code fragment in this
+README (copied verbatim into procs that are never called).
 - `tests/t_bridge.nim`: spawns a real bridge, exercises handshake, auth,
 streaming errors, shutdown, attaching to an external bridge, auto-relaunch
 after the process is killed (and the opt-out), URL/token pair validation,
-the `GetVersion` protocol check (against a fake bridge), and the callback
-server (JSON, binary protobuf, chunked bodies). Needs the bridge binary
-(downloaded if absent) but no API key.
+the `GetVersion` protocol check (against a fake bridge), the advertised
+agent limit, and the callback server (JSON, binary protobuf, chunked
+bodies). Needs the bridge binary (downloaded if absent) but no API key.
 - `tests/t_live.nim`: full turns against Cursor's API, including a custom
 tool round trip with a >15 s tool pause (keepalives), a custom store round
 trip, cancellation (on its own bridge, verifying auto-relaunch if the bridge
 crashes), a bridge killed mid-run (`wait()` reports the run lost, the agent
-recovers), observe/replay, `delete(force = true)`, and agent lifecycle. Runs
+recovers), observe/replay, `delete(force = true)`, client-side enforcement
+of `maxConcurrentAgents`, and agent lifecycle. Runs
 only when `CURSOR_API_KEY` is set (or present in a gitignored `.env`).
 Spends real requests. On Windows, post-run `delete()` assertions are
 skipped (printed as `skipped`) because of the bridge `EBUSY` bug above.

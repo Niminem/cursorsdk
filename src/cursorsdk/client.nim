@@ -4,7 +4,7 @@
 ##
 ## The bridge is started lazily on the first RPC and stopped by `close`.
 
-import std/[asyncdispatch, json, os, options, strutils]
+import std/[asyncdispatch, json, os, options, strutils, sets]
 import bridge, connect, errors, types, version
 
 export options, types, errors
@@ -70,6 +70,9 @@ type
       ## Times the managed bridge has been relaunched after an unexpected exit.
     toolCallbackUrl, toolCallbackToken: string
       ## Last runtime `setToolCallback`, re-applied after a relaunch.
+    loadedIds: HashSet[string]
+      ## Agents this client created or resumed on the current bridge
+      ## process and has not closed or deleted; see `loadedAgents`.
 
 proc initClientOptions*(): ClientOptions =
   ClientOptions(allowDownload: true, autoRelaunch: true)
@@ -171,16 +174,16 @@ proc start*(c: Client): Future[void] =
     f.fail((ref BridgeError)(msg: "client is closed"))
     return f
   if c.startFut.isNil:
-    let f = c.startImpl()
-    if f.failed:
+    let fut = c.startImpl()
+    if fut.failed:
       # Failed before its first `await` (option validation). Do not cache
       # it: the reset callback below only runs on the next dispatcher
       # poll, and `await` on a finished future does not yield, so a caller
       # retrying from the same async context would see the stale failure.
-      return f
-    c.startFut = f
+      return fut
+    c.startFut = fut
     # Allow retry after a failed start.
-    f.callback = proc (f: Future[void]) =
+    fut.callback = proc (f: Future[void]) =
       if f.failed: c.startFut = nil
   c.startFut
 
@@ -204,6 +207,7 @@ proc ensure(c: Client) {.async.} =
     c.bridge = nil
     c.rpc = nil
     c.startFut = nil
+    c.loadedIds.clear()         # a fresh process has nothing loaded
     inc c.relaunches
   await c.start()
 
@@ -289,18 +293,59 @@ proc fillDefaults(c: Client, options: AgentOptions): AgentOptions =
   elif result.local.cwd.len > 0:
     result.local.cwd = normalizeWorkspace(result.local.cwd)
 
+# --- Advertised agent limit -------------------------------------------------
+#
+# The bridge advertises `maxConcurrentAgents` on its ready line when launched
+# with `--max-concurrent-agents` (`ClientOptions.bridgeArgs`). Bridge 1.0.35
+# does not enforce it itself (verified: a second CreateAgent against a limit
+# of 1 succeeds), so this client does, from its own view of what is loaded.
+
+proc maxConcurrentAgents*(c: Client): Option[int] =
+  ## The agent limit the bridge advertised, if any. `none` before the bridge
+  ## has started, for attached bridges, and when no limit was configured.
+  if c.bridge != nil: c.bridge.info.maxConcurrentAgents else: none(int)
+
+proc loadedAgents*(c: Client): int =
+  ## Agents this client has created or resumed on the current bridge
+  ## process and not yet closed or deleted. This is the client's own
+  ## bookkeeping: agents loaded through the raw `call` escape hatch, or by
+  ## another client attached to the same bridge, are not counted. Reset on
+  ## relaunch (a fresh process has nothing loaded).
+  c.loadedIds.len
+
+proc admitAgent(c: Client, agentId = "") =
+  ## Raises `RateLimitError` (Connect `resource_exhausted`) if loading one
+  ## more agent would exceed the advertised limit. Re-resuming an agent
+  ## that is already loaded never counts twice.
+  if agentId.len > 0 and agentId in c.loadedIds: return
+  let limit = c.maxConcurrentAgents
+  if limit.isSome and c.loadedIds.len >= limit.get:
+    raise newRpcError(ccResourceExhausted,
+      "bridge limit reached: maxConcurrentAgents = " & $limit.get & " and " &
+      $c.loadedIds.len & " agent(s) are loaded by this client; close() or delete() one first")
+
 proc createAgentRaw*(c: Client, options: AgentOptions, idempotencyKey = ""):
     Future[tuple[agentId: string, model: ModelSelection]] {.async.} =
+  ## Raises `RateLimitError` client-side when the bridge's advertised
+  ## `maxConcurrentAgents` is reached (see `loadedAgents`).
   var req = %*{"options": c.fillDefaults(options).toJson}
   if idempotencyKey.len > 0: req["idempotencyKey"] = %idempotencyKey
+  await c.ensure()            # the limit is known only once the bridge is up
+  c.admitAgent()
   let r = await c.call(AgentService, "CreateAgent", req)
   result = (jStr(r, "agentId"), parseModelSelection(jObj(r, "model")))
+  c.loadedIds.incl result.agentId
 
 proc resumeAgentRaw*(c: Client, agentId: string, options: AgentOptions):
     Future[tuple[agentId: string, model: ModelSelection]] {.async.} =
+  ## Raises `RateLimitError` client-side when the bridge's advertised
+  ## `maxConcurrentAgents` is reached and `agentId` is not already loaded.
   let req = %*{"agentId": agentId, "options": c.fillDefaults(options).toJson}
+  await c.ensure()
+  c.admitAgent(agentId)
   let r = await c.call(AgentService, "ResumeAgent", req)
   result = (jStr(r, "agentId", agentId), parseModelSelection(jObj(r, "model")))
+  c.loadedIds.incl result.agentId
 
 proc reloadAgent*(c: Client, agentId: string) {.async.} =
   discard await c.call(AgentService, "ReloadAgent", %*{"agentId": agentId})
@@ -308,6 +353,7 @@ proc reloadAgent*(c: Client, agentId: string) {.async.} =
 proc closeAgent*(c: Client, agentId: string) {.async.} =
   ## Releases local resources for an agent. Durable state is kept.
   discard await c.call(AgentService, "CloseAgent", %*{"agentId": agentId})
+  c.loadedIds.excl agentId
 
 proc storeCwd(c: Client, cwd: string): string =
   ## Local agent state is stored per cwd; default to the client workspace.
@@ -337,6 +383,7 @@ proc unarchiveAgent*(c: Client, agentId: string, cwd = "") {.async.} =
 proc deleteAgent*(c: Client, agentId: string, cwd = "") {.async.} =
   ## Permanently deletes an agent and its durable data.
   discard await c.call(AgentService, "DeleteAgent", %*{"agentId": agentId, "options": c.opOptions(cwd)})
+  c.loadedIds.excl agentId
 
 proc listAgentMessages*(c: Client, agentId: string,
                         options = ListAgentMessagesOptions()): Future[seq[AgentMessage]] {.async.} =

@@ -34,5 +34,10 @@
 ## - `cursorsdk/version`  pinned bridge release and protocol constants
 ## - `cursorsdk/bridge`   bridge process management (advanced)
 
+import std/[json, tables]
 import cursorsdk/[client, agent, run, types, errors, callbacks, version]
 export client, agent, run, types, errors, callbacks, version
+# `JsonNode` / `%*` and `Table` are part of the public surface (tool
+# arguments and results, `mcpServers`, `customTools`, `extra`), so a user
+# needs only `import std/asyncdispatch` and `import cursorsdk`.
+export json, tables

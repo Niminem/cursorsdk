@@ -401,6 +401,41 @@ else:
           discard await client.getAgent(fresh.id)
       waitFor run()
 
+    test "advertised maxConcurrentAgents is enforced client-side":
+      # Bridge 1.0.35 advertises `--max-concurrent-agents` on the ready line
+      # but does not enforce it (a second CreateAgent against a limit of 1
+      # succeeds), so the client refuses from its own count of loaded
+      # agents. No runs: only CreateAgent/ResumeAgent/Close/Delete calls.
+      proc run() {.async.} =
+        var lo = initClientOptions()
+        lo.apiKey = apiKey
+        lo.workspace = workspace
+        lo.bridgeArgs = @["--max-concurrent-agents", "1"]
+        let limited = newClient(lo)
+        try:
+          let a1 = await limited.createAgent(modelId)
+          check limited.maxConcurrentAgents == some(1)
+          check limited.loadedAgents == 1
+          expect RateLimitError:
+            discard await limited.createAgent(modelId)
+          discard await limited.resumeAgent(a1.id)   # already loaded: no second slot
+          check limited.loadedAgents == 1
+          await a1.close()
+          check limited.loadedAgents == 0
+          let a2 = await limited.createAgent(modelId) # slot freed by close()
+          check limited.loadedAgents == 1
+          await a2.delete(force = true)               # never ran: safe on Windows too
+          check limited.loadedAgents == 0
+          # Clean up a1: load it again, then force-delete (it never ran).
+          let a1Again = await limited.resumeAgent(a1.id)
+          check limited.loadedAgents == 1
+          await a1Again.delete(force = true)
+          check limited.loadedAgents == 0
+        finally:
+          try: await limited.close()
+          except CatchableError: discard
+      waitFor run()
+
     test "agent lifecycle: info, close, archive, delete":
       proc run() {.async.} =
         let info = await agent.info()

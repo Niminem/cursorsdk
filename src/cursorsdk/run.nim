@@ -96,6 +96,10 @@ proc next*(r: Run): Future[Option[RunEvent]] {.async.} =
     let ev = parseRunEvent(m.get)
     if ev.kind == rekUnknown:
       if ev.isKeepalive: inc r.keepalives
+      # An envelope case this build does not know was still delivered at
+      # its offset; advance past it so a later `observe` does not replay
+      # it. Keepalives carry no offset (streaming.md) and never advance.
+      elif ev.offset.len > 0: r.lastOffset = ev.offset
       continue
     r.track(ev)
     return some(ev)
@@ -121,6 +125,19 @@ proc observe*(r: Run): Future[Run] {.async.} =
   result = newRun(r.client, r.agentId, s, fromObserve = true)
   result.runId = r.runId
 
+const
+  BridgeExitGraceMs = 1_500
+    ## How long `wait` gives the supervisor to report a bridge exit after
+    ## the stream drops. The socket error usually lands a few ms before the
+    ## exit event; the bridge 1.0.35 Windows post-cancel crash can take
+    ## about a second.
+  BridgeExitPollMs = 50
+
+proc bridgeLost(r: Run): bool =
+  ## True once the managed bridge this run was started on is gone.
+  let b = r.client.bridge
+  (b != nil and b.managed and b.hasExited) or r.client.relaunches != r.relaunchesAtStart
+
 proc wait*(r: Run): Future[RunResult] {.async.} =
   ## Drains the stream and returns the terminal `RunResult`. If the
   ## connection drops before the result arrives, falls back to
@@ -133,10 +150,20 @@ proc wait*(r: Run): Future[RunResult] {.async.} =
       if ev.isNone: break
   except TransportError:
     if r.runId.len == 0: raise
-    await sleepAsync(0)   # let a pending bridge-exit event be processed
+    # On loopback a dropped stream almost always means the bridge died,
+    # but its exit is reported by the supervisor thread and can arrive
+    # after the socket error. Poll briefly before trusting the port, so
+    # this raises "run lost" rather than a connect-refused `TransportError`
+    # from `WaitLiveRun`. Attached bridges are never "lost" by this client.
+    # (`bridge` is nil only while a managed bridge is being relaunched.)
     let b = r.client.bridge
-    if (b != nil and b.managed and b.hasExited) or r.client.relaunches != r.relaunchesAtStart:
-      raise (ref TransportError)(msg: "run " & r.runId & " lost: the bridge exited before it finished")
+    if b == nil or b.managed:
+      var waited = 0
+      while not r.bridgeLost and waited < BridgeExitGraceMs:
+        await sleepAsync(BridgeExitPollMs)
+        waited += BridgeExitPollMs
+      if r.bridgeLost:
+        raise (ref TransportError)(msg: "run " & r.runId & " lost: the bridge exited before it finished")
   if r.resultOpt.isSome:
     return r.resultOpt.get
   if r.runId.len == 0:

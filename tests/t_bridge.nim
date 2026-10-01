@@ -246,6 +246,25 @@ suite "client":
         discard await launchBridge(lo)
     waitFor run()
 
+  test "advertised agent limit is exposed and bookkeeping ignores failed loads":
+    # Enforcement needs a real CreateAgent (API key); t_live covers it.
+    proc run() {.async.} =
+      var o = initClientOptions()
+      o.workspace = getTempDir()
+      o.apiKey = "unused-here"
+      o.bridgeArgs = @["--max-concurrent-agents", "1"]
+      let c = newClient(o)
+      check c.maxConcurrentAgents.isNone       # unknown until the bridge is up
+      await c.start()
+      check c.maxConcurrentAgents == some(1)
+      check c.loadedAgents == 0
+      # A resume the bridge rejects must not occupy a slot.
+      expect RpcError:
+        discard await c.resumeAgent("agent-does-not-exist")
+      check c.loadedAgents == 0
+      await c.close()
+    waitFor run()
+
   test "GetVersion protocol mismatch is a BridgeError":
     # A fake bridge that answers every RPC with a GetVersionResponse for a
     # protocol this client does not speak. Attach to it: the start must
