@@ -34,7 +34,7 @@ cd cursorsdk
 nimble install
 ```
 
-Once published: `nimble install cursorsdk`.
+Once published([check status](https://github.com/nim-lang/packages/pull/3553)): `nimble install cursorsdk`.
 
 Requires Nim 2.2.10 or newer. A Cursor API key is required to run agents:
 create a user API key under API Keys in the
