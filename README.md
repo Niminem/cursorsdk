@@ -578,15 +578,20 @@ README (copied verbatim into procs that are never called).
 streaming errors, shutdown, attaching to an external bridge, auto-relaunch
 after the process is killed (and the opt-out), URL/token pair validation,
 the `GetVersion` protocol check (against a fake bridge), the advertised
-agent limit, and the callback server (JSON, binary protobuf, chunked
-bodies). Needs the bridge binary (downloaded if absent) but no API key.
+agent limit, `restartBridge`, and the callback server (JSON, binary
+protobuf, chunked bodies). Needs the bridge binary (downloaded if absent)
+but no API key.
 - `tests/t_live.nim`: full turns against Cursor's API, including a custom
 tool round trip with a >15 s tool pause (keepalives), a custom store round
 trip, cancellation (on its own bridge, verifying auto-relaunch if the bridge
 crashes), a bridge killed mid-run (`wait()` reports the run lost, the agent
-recovers), observe/replay, `delete(force = true)`, client-side enforcement
-of `maxConcurrentAgents`, and agent lifecycle. Runs
-only when `CURSOR_API_KEY` is set (or present in a gitignored `.env`).
+recovers), observe/replay, `delete(force = true)`, `modelCatalog` (a model
+id absent from the real catalog is accepted when ours lists it, proving
+validation stayed local), client-side enforcement of `maxConcurrentAgents`,
+and agent lifecycle. Tests that spawn their own bridge pass the catalog and
+a 15 s `agentLoadTimeoutMs`, so they cannot hang on the bridge's own
+`ListModels` call. Runs only when `CURSOR_API_KEY` is set (or present in a
+gitignored `.env`).
 Spends real requests. On Windows, post-run `delete()` assertions are
 skipped (printed as `skipped`) because of the bridge `EBUSY` bug above.
 
