@@ -26,15 +26,19 @@ agent model in more depth than this README does.
 
 ## Install
 
-Not yet in the Nimble package index. Until it is, install from source:
+Via Nimble:
+
+```sh
+nimble install cursorsdk
+```
+
+Or clone from source:
 
 ```sh
 git clone --recursive https://github.com/Niminem/cursorsdk   # --recursive pulls the vendored sdk-bridge protocol docs
 cd cursorsdk
 nimble install
 ```
-
-Once published([check status](https://github.com/nim-lang/packages/pull/3553)): `nimble install cursorsdk`.
 
 Requires Nim 2.2.10 or newer. A Cursor API key is required to run agents:
 create a user API key under API Keys in the
