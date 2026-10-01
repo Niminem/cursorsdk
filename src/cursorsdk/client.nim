@@ -38,6 +38,12 @@ type
     startupTimeoutMs*: int       ## 0 → 30 000
     unaryTimeoutMs*: int         ## 0 → 60 000
     allowDownload*: bool         ## default true
+    autoRelaunch*: bool
+      ## Default true. If the managed bridge exits unexpectedly, the next
+      ## RPC relaunches it. Agents are durable, so callers simply retry.
+    onBridgeRelaunch*: proc(exitCode: int, outputTail: string) {.gcsafe.}
+      ## Called just before an unexpected exit triggers a relaunch, with the
+      ## dead bridge's exit code and its last stderr lines. Default: silent.
     env*: seq[(string, string)]  ## extra bridge environment
     toolCallbackUrl*, toolCallbackToken*: string
       ## Launch-time custom-tool callback registration (see callbacks.nim).
@@ -50,9 +56,13 @@ type
     rpc*: ConnectClient
     startFut: Future[void]
     closed: bool
+    relaunches*: int
+      ## Times the managed bridge has been relaunched after an unexpected exit.
+    toolCallbackUrl, toolCallbackToken: string
+      ## Last runtime `setToolCallback`, re-applied after a relaunch.
 
 proc initClientOptions*(): ClientOptions =
-  ClientOptions(allowDownload: true)
+  ClientOptions(allowDownload: true, autoRelaunch: true)
 
 proc normalizeWorkspace*(path: string): string =
   ## Canonical absolute path (symlinks resolved when the directory exists).
@@ -109,6 +119,12 @@ proc startImpl(c: Client) {.async.} =
     c.bridge = await launchBridge(lo)
   c.rpc = newConnectClient(c.bridge.url, c.bridge.token,
                            unaryTimeoutMs = (if c.opts.unaryTimeoutMs > 0: c.opts.unaryTimeoutMs else: 60_000))
+  # A runtime tool callback does not survive a relaunch; re-register it.
+  # (Launch-time callbacks come from `opts` and were passed on the command line.)
+  # Uses `rpc` directly: `call` would wait on the start future we are inside.
+  if c.relaunches > 0 and c.toolCallbackUrl.len > 0:
+    discard await c.rpc.unary(ControlService, "SetToolCallback",
+                              %*{"url": c.toolCallbackUrl, "authToken": c.toolCallbackToken})
 
 proc start*(c: Client): Future[void] =
   ## Starts (or attaches to) the bridge. Idempotent; concurrent callers
@@ -126,7 +142,31 @@ proc start*(c: Client): Future[void] =
 
 proc isStarted*(c: Client): bool = c.rpc != nil
 
-proc ensure(c: Client): Future[void] {.inline.} = c.start()
+proc needsRelaunch(c: Client): bool =
+  c.opts.autoRelaunch and not c.closed and
+    c.bridge != nil and c.bridge.managed and c.bridge.hasExited and
+    not c.startFut.isNil and c.startFut.finished   # not mid-start
+
+proc ensure(c: Client) {.async.} =
+  ## Starts the bridge, or relaunches a managed one that died (e.g. the
+  ## bridge 1.0.35 Windows crash after `CancelRun`). State is on disk, so
+  ## existing `Agent` handles keep working; streams that were open on the
+  ## dead bridge fail with `TransportError` and must be retried.
+  if c.needsRelaunch:
+    if c.opts.onBridgeRelaunch != nil:
+      try: c.opts.onBridgeRelaunch(c.bridge.exitCode, c.bridge.outputTailText())
+      except CatchableError: discard
+    await c.bridge.shutdown()   # already exited: just releases resources
+    c.bridge = nil
+    c.rpc = nil
+    c.startFut = nil
+    inc c.relaunches
+  await c.start()
+
+proc ensureBridge*(c: Client): Future[void] =
+  ## Starts the bridge, relaunching it first if it died. Normally implicit
+  ## in every RPC; exposed so handles can check `relaunches` beforehand.
+  c.ensure()
 
 proc close*(c: Client, graceSeconds = 0, timeoutMs = 5_000) {.async.} =
   ## Shuts the managed bridge down (`Shutdown` RPC → wait → kill).
@@ -166,8 +206,10 @@ proc hasCapability*(c: Client, capability: string): Future[bool] {.async.} =
 
 proc setToolCallback*(c: Client, url, authToken: string) {.async.} =
   ## Registers (or clears, with an empty `url`) the custom-tool callback
-  ## endpoint after startup.
+  ## endpoint after startup. Remembered so a relaunched bridge gets it too.
   discard await c.call(ControlService, "SetToolCallback", %*{"url": url, "authToken": authToken})
+  c.toolCallbackUrl = url
+  c.toolCallbackToken = authToken
 
 # ---------------------------------------------------------------------------
 # SdkCursorService (catalog; per-call api_key is mandatory)

@@ -106,7 +106,7 @@ returns the ids, parameters, and preset variants available to your account.
 | `Agent`          | `createAgent` / `resumeAgent`; `send` → `Run`; `id`, `model`, `cwd`; `info`, `reload`, `close`, `archive`, `unarchive`, `delete(force)`, `runs`, `messages`, `usage`.                                |
 | `Run`            | `next` (events), `nextText` (assistant text), `wait` (terminal `RunResult`), `text`, `failed`, `raiseIfFailed`, `observe` (re-attach after a dropped stream), `cancel`, `close`, `keepalives`.       |
 | `CallbackServer` | Loopback server for custom tools (`registerTool`) and custom stores (`setStoreHandler`).                                                                                                             |
-| `ClientOptions`  | API key, workspace, bridge path/URL/token, state root, default store, callback endpoints, verbose logging, startup/RPC timeouts, `allowDownload`.                                                    |
+| `ClientOptions`  | API key, workspace, bridge path/URL/token, state root, default store, callback endpoints, verbose logging, startup/RPC timeouts, `allowDownload`, `autoRelaunch` / `onBridgeRelaunch`.               |
 
 
 Mapping to first-party names where they differ: `Agent.create` →
@@ -140,6 +140,44 @@ Attached bridges are not shut down by `client.close()`. Nothing is spawned
 until the first RPC (or `await client.start()`); `client.ping()`,
 `client.bridgeVersion()`, and `client.hasCapability("agent.usage")` report
 bridge health, version, and feature flags.
+
+### Bridge resilience
+
+If a *managed* bridge process exits unexpectedly, the next RPC relaunches it
+and the call proceeds. Agents are durable on disk (the same property
+`resumeAgent` relies on), so existing `Agent` handles keep working and the
+conversation continues from the last completed turn: on its next `send()`
+an `Agent` re-resumes itself on the new bridge (a fresh process only knows
+agents it has loaded) and cancels any run the dead bridge left non-terminal
+(the bridge rejects `Send` while one is "active"). A runtime
+`setToolCallback` / `attachToolCallbacks` registration is re-applied;
+launch-time callback URLs are passed again on the command line, and your
+`CallbackServer` is unaffected since it lives in your process.
+
+What is lost: runs that were in progress on the dead bridge. Local runs
+execute inside the bridge, so they die with it. `next()` fails with
+`TransportError`; `wait()` detects that the bridge exited and raises
+`TransportError` ("run … lost") rather than falling back to `WaitLiveRun`
+for a run the new bridge never had; `observe()` replays what was recorded
+but never sees a terminal `result`. Continue by calling `send()` again. An RPC that
+races the crash can also fail once with `TransportError` before the exit is
+noticed; the one after it relaunches.
+
+```nim
+o.autoRelaunch = true                # default
+o.onBridgeRelaunch = proc(exitCode: int, outputTail: string) {.gcsafe.} =
+  stderr.writeLine "bridge exited (", exitCode, "), relaunching\n", outputTail
+# later: client.relaunches  # how many times it has happened
+```
+
+Set `autoRelaunch = false` to get a hard `TransportError` instead. Attached
+bridges (`bridgeUrl`) are never relaunched. This goes beyond the upstream
+adapter design, which treats a dead bridge as fatal; it still honours that
+design (one managed bridge per client, lazy start, attach supported, exit
+handler kills the live process) and is opt-out. It was added as a workaround
+for the bridge 1.0.35 crash after `run.cancel()` on Windows (see "Notes on
+this bridge release") and is kept as general hardening: a crashed bridge
+should not require rebuilding your client.
 
 ### Agent options
 
@@ -331,7 +369,7 @@ expects `{"items": [...]}`; `runEvents.append` is
 `{"runId", "eventType", "payload"}`; checkpoint blobs are base64 strings,
 written as `{"agentId", "blobId", "data"}` and read back as
 `{"found": bool, "data": ...}`. See
-`[docs/services.md](vendor/sdk-bridge/docs/services.md)` for the rules;
+[docs/services.md](vendor/sdk-bridge/docs/services.md) for the rules;
 `tests/t_live.nim` has a complete in-memory store.
 
 ## The bridge binary
@@ -395,18 +433,20 @@ for the life of the process and `DeleteAgent` removes the directory without
 closing it. POSIX allows unlinking open files; Windows refuses with
 `InternalError` ("EBUSY: resource busy or locked, rm …"). `close()`,
 `archive()`, and waiting do not release the handle. The agent stays
-registered, and the delete succeeds from a fresh bridge process (restart the
-client, then delete). Agents that never ran have no `store.db` yet, so
-`delete(force = true)` on a fresh agent works everywhere.
+registered, and any fresh bridge process can delete it (`close()` the
+client, create a new one, then `delete()`). Agents that never ran have no
+`store.db` yet, so `delete(force = true)` on a fresh agent works everywhere.
 - **Windows: `run.cancel()` can crash the bridge.** `CancelRun` succeeds and
 the run reports `CANCELLED`, but within about a second the bridge process
-can die with a Bun "Internal assertion failure" (exit code 3); every later
-RPC then fails with `TransportError` ("connection closed" / "connection
-refused"). Cancelling on the first stream event crashes it every time;
-cancelling after real text has streamed crashes it some of the time. There
-is no client-side timing that avoids it. If you cancel on Windows, treat a
-`TransportError` afterwards as "bridge gone": `close()` the client and
-create a new one. macOS/Linux are not affected.
+can die with a Bun "Internal assertion failure" (exit code 3). Cancelling on
+the first stream event crashes it every time; cancelling after real text has
+streamed crashes it some of the time. No client-side timing avoids it.
+**`cancel()` is still usable:** the cancelled run is already terminal when
+the crash happens, and the client relaunches the bridge once the exit is
+noticed (see "Bridge resilience"). The practical effect is a startup delay,
+one `TransportError` on any stream open at the time or any RPC racing the
+crash, and the loss of other runs that were in progress on that bridge. Set
+`onBridgeRelaunch` if you want to log it. macOS/Linux are not affected.
 
 
 
@@ -443,10 +483,12 @@ streaming errors, shutdown, and the callback server. Needs the bridge
 binary (downloaded if absent) but no API key.
 - `tests/t_live.nim`: full turns against Cursor's API, including a custom
 tool round trip with a >15 s tool pause (keepalives), a custom store round
-trip, cancellation, observe/replay, `delete(force = true)`, and agent
-lifecycle. Runs only when
-`CURSOR_API_KEY` is set (or present in a gitignored `.env`). Spends real
-requests.
+trip, cancellation (on its own bridge, verifying auto-relaunch if the bridge
+crashes), a bridge killed mid-run (`wait()` reports the run lost, the agent
+recovers), observe/replay, `delete(force = true)`, and agent lifecycle. Runs
+only when `CURSOR_API_KEY` is set (or present in a gitignored `.env`).
+Spends real requests. On Windows, post-run `delete()` assertions are
+skipped (printed as `skipped`) because of the bridge `EBUSY` bug above.
 
 
 

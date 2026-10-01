@@ -11,6 +11,9 @@ import cursorsdk/[connect, http, protobuf, bridge]
 when not defined(windows):
   import std/posix
   proc pidAlive(pid: int): bool = posix.kill(Pid(pid), 0) == 0
+  proc killProcess(pid: int) = discard posix.kill(Pid(pid), SIGKILL)
+else:
+  proc killProcess(pid: int) = discard execShellCmd("taskkill /PID " & $pid & " /F >NUL 2>&1")
 
 suite "bridge lifecycle":
   test "launch, handshake, ping, version, shutdown":
@@ -141,6 +144,45 @@ suite "client":
       await attached.close()            # must not stop the owner's bridge
       check (await owner.ping()) == "pong"
       await owner.close()
+    waitFor run()
+
+  test "auto-relaunch after the bridge dies":
+    proc run() {.async.} =
+      var o = initClientOptions()
+      o.workspace = getTempDir()
+      o.apiKey = "unused-here"
+      var hookExitCodes: seq[int]
+      o.onBridgeRelaunch = proc(exitCode: int, tail: string) {.gcsafe.} =
+        hookExitCodes.add exitCode
+      let c = newClient(o)
+      check (await c.ping()) == "pong"
+      # A runtime tool callback must be re-applied on relaunch (exercised
+      # by the relaunch succeeding; the bridge only stores the values).
+      await c.setToolCallback("http://127.0.0.1:1/tools", "tok")
+      let firstPid = c.bridge.pid
+      killProcess(firstPid)
+      await c.bridge.waitExit()
+      check c.bridge.hasExited
+      check (await c.ping()) == "pong"       # transparently relaunched
+      check c.relaunches == 1
+      check hookExitCodes.len == 1
+      check c.bridge.pid != firstPid
+      check not c.bridge.hasExited
+      await c.close()
+
+      # Opt-out: the dead bridge is reported, not replaced.
+      var o2 = initClientOptions()
+      o2.workspace = getTempDir()
+      o2.apiKey = "unused-here"
+      o2.autoRelaunch = false
+      let c2 = newClient(o2)
+      check (await c2.ping()) == "pong"
+      killProcess(c2.bridge.pid)
+      await c2.bridge.waitExit()
+      expect TransportError:
+        discard await c2.ping()
+      check c2.relaunches == 0
+      await c2.close()
     waitFor run()
 
   test "missing api key is reported before any RPC":

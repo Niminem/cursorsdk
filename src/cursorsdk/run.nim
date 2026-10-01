@@ -3,7 +3,8 @@
 ## Wraps a live `Send` stream or a durable `ObserveRun` stream. Iterate
 ## events with `next`, pull assistant text with `nextText`, or block with
 ## `wait`. A dropped stream never cancels the run: `observe` re-attaches and
-## `wait` falls back to `WaitLiveRun`.
+## `wait` falls back to `WaitLiveRun`. A bridge that exits mid-run does kill
+## the run; `wait` then raises `TransportError` ("run lost").
 ##
 ## See vendor/sdk-bridge/docs/streaming.md.
 
@@ -33,9 +34,11 @@ type
     fromObserve: bool
     finished: bool
     resultOpt: Option[RunResult]
+    relaunchesAtStart: int           ## detects a bridge that died under this run
 
 proc newRun*(client: Client, agentId: string, stream: ConnectStream, fromObserve = false): Run =
-  Run(client: client, agentId: agentId, stream: stream, fromObserve: fromObserve)
+  Run(client: client, agentId: agentId, stream: stream, fromObserve: fromObserve,
+      relaunchesAtStart: client.relaunches)
 
 proc finished*(r: Run): bool = r.finished
 proc isObserve*(r: Run): bool = r.fromObserve
@@ -119,8 +122,10 @@ proc observe*(r: Run): Future[Run] {.async.} =
   result.runId = r.runId
 
 proc wait*(r: Run): Future[RunResult] {.async.} =
-  ## Drains the stream and returns the terminal `RunResult`. If the stream
-  ## drops before the result arrives, falls back to `WaitLiveRun`.
+  ## Drains the stream and returns the terminal `RunResult`. If the
+  ## connection drops before the result arrives, falls back to
+  ## `WaitLiveRun`. If the managed bridge itself exited, the run died with
+  ## it and a `TransportError` ("run lost") is raised instead.
   if r.resultOpt.isSome and r.finished: return r.resultOpt.get
   try:
     while true:
@@ -128,6 +133,10 @@ proc wait*(r: Run): Future[RunResult] {.async.} =
       if ev.isNone: break
   except TransportError:
     if r.runId.len == 0: raise
+    await sleepAsync(0)   # let a pending bridge-exit event be processed
+    let b = r.client.bridge
+    if (b != nil and b.managed and b.hasExited) or r.client.relaunches != r.relaunchesAtStart:
+      raise (ref TransportError)(msg: "run " & r.runId & " lost: the bridge exited before it finished")
   if r.resultOpt.isSome:
     return r.resultOpt.get
   if r.runId.len == 0:

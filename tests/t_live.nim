@@ -32,6 +32,12 @@ let verbose = getEnv("CURSOR_TEST_VERBOSE").len > 0
 # those deletes on Windows until upstream closes the store before rm.
 const deleteAfterRunWorks = not defined(windows)
 
+when defined(windows):
+  proc killProcess(pid: int) = discard execShellCmd("taskkill /PID " & $pid & " /F >NUL 2>&1")
+else:
+  import std/posix
+  proc killProcess(pid: int) = discard posix.kill(Pid(pid), SIGKILL)
+
 if apiKey.len == 0:
   echo "t_live: CURSOR_API_KEY not set; skipping live tests"
 else:
@@ -179,7 +185,8 @@ else:
         if deleteAfterRunWorks:
           await toolAgent.delete()
         else:
-          echo "  skipped delete (bridge EBUSY bug on Windows)"
+          await toolAgent.close()
+          echo "  skipped delete (bridge EBUSY bug on Windows); closed instead"
       waitFor run()
 
     test "custom store round trip":
@@ -266,14 +273,19 @@ else:
           await storeClient.close()
       waitFor run()
 
-    test "cancel an in-flight run":
+    test "cancel an in-flight run (and recover if the bridge crashes)":
       # On Windows, bridge 1.0.35 can crash (Bun assertion, exit 3) shortly
-      # *after* a successful CancelRun, regardless of timing. Run this test
-      # on its own bridge so a crash cannot take down the tests that follow.
+      # *after* a successful CancelRun, regardless of timing. Run on a
+      # private bridge so other tests are unaffected, then prove the client
+      # auto-relaunches and the same agent keeps working.
       proc run() {.async.} =
         var co = initClientOptions()
         co.apiKey = apiKey
         co.workspace = workspace
+        var hookCalls = 0
+        co.onBridgeRelaunch = proc(exitCode: int, tail: string) {.gcsafe.} =
+          inc hookCalls
+          echo "  !! bridge exited (code ", exitCode, "); relaunching"
         let cancelClient = newClient(co)
         try:
           let a = await cancelClient.createAgent(modelId)
@@ -296,12 +308,54 @@ else:
           await sleepAsync(1_500)   # the post-cancel crash lands within ~1 s
           let crashed = cancelClient.bridge != nil and cancelClient.bridge.hasExited
           if crashed:
-            echo "  !! bridge crashed after cancel (known 1.0.35 Windows bug), exit code ",
-                 cancelClient.bridge.exitCode
+            echo "  !! bridge crashed after cancel (known 1.0.35 Windows bug)"
           when not defined(windows):
             check not crashed
+          # Same client, same agent: must work whether or not the bridge died.
+          # A crash that lands after the check above costs one TransportError
+          # (documented); the retry then goes through the relaunched bridge.
+          var after: RunResult
+          try:
+            after = await (await a.send("Reply with exactly the word PONG and nothing else.")).wait()
+          except TransportError:
+            after = await (await a.send("Reply with exactly the word PONG and nothing else.")).wait()
+          check after.status == rlsFinished
+          check "PONG" in after.text.toUpperAscii
+          if crashed: check cancelClient.relaunches >= 1
+          check hookCalls == cancelClient.relaunches
+          check not cancelClient.bridge.hasExited
         finally:
           try: await cancelClient.close()
+          except CatchableError: discard
+      waitFor run()
+
+    test "bridge dies mid-run: wait() reports the run as lost, agent recovers":
+      proc run() {.async.} =
+        var ko = initClientOptions()
+        ko.apiKey = apiKey
+        ko.workspace = workspace
+        let killClient = newClient(ko)
+        try:
+          let a = await killClient.createAgent(modelId)
+          let run = await a.send(
+            "Write a very long essay (at least 3000 words) about the history of compilers.")
+          discard await run.next()           # run id known, run in progress
+          check run.runId.len > 0
+          killProcess(killClient.bridge.pid)
+          await killClient.bridge.waitExit()
+          try:
+            discard await run.wait()
+            check false
+          except TransportError as e:
+            check "lost" in e.msg             # not a WaitLiveRun fallback
+          check killClient.relaunches == 0    # wait() must not relaunch by itself
+          # The agent survives; the next turn relaunches the bridge.
+          let after = await (await a.send("Reply with exactly the word PONG and nothing else.")).wait()
+          check after.status == rlsFinished
+          check "PONG" in after.text.toUpperAscii
+          check killClient.relaunches == 1
+        finally:
+          try: await killClient.close()
           except CatchableError: discard
       waitFor run()
 

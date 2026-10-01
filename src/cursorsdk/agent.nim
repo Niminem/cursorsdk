@@ -10,12 +10,28 @@ type
     id*: string
     model*: ModelSelection
     options*: AgentOptions           ## options the agent was created/resumed with
+    generation: int                  ## `client.relaunches` when the bridge last loaded this agent
+
+proc cancelNonTerminalRuns*(a: Agent): Future[void] {.async.}
+
+proc ensureLoaded(a: Agent) {.async.} =
+  ## A relaunched bridge only knows agents it has loaded. `Send` needs the
+  ## agent in memory, so re-resume it once per relaunch. Relaunch is lazy:
+  ## trigger it first so `relaunches` reflects the bridge we will talk to.
+  await a.client.ensureBridge()
+  if a.client.relaunches != a.generation:
+    let (_, model) = await a.client.resumeAgentRaw(a.id, a.options)
+    a.model = model
+    a.generation = a.client.relaunches
+    # A run that died with the old bridge is still "active" in the store
+    # and blocks Send. Nothing can be live on a bridge that just started.
+    await a.cancelNonTerminalRuns()
 
 proc createAgent*(c: Client, options: AgentOptions, idempotencyKey = ""): Future[Agent] {.async.} =
   ## Creates a local agent. `options.model` is required; `options.local.cwd`
   ## defaults to the client workspace; `apiKey` defaults to the client key.
   let (id, model) = await c.createAgentRaw(options, idempotencyKey)
-  result = Agent(client: c, id: id, model: model, options: options)
+  result = Agent(client: c, id: id, model: model, options: options, generation: c.relaunches)
   if result.options.local.cwd.len > 0:
     result.options.local.cwd = normalizeWorkspace(result.options.local.cwd)
   elif result.options.local.dirs.len == 0:
@@ -32,11 +48,12 @@ proc resumeAgent*(c: Client, agentId: string, options = AgentOptions()): Future[
   ## Re-attaches to an existing agent, applying `options` (model, tools,
   ## MCP servers, custom tools). Durable state is loaded from the store.
   let (id, model) = await c.resumeAgentRaw(agentId, options)
-  result = Agent(client: c, id: id, model: model, options: options)
+  result = Agent(client: c, id: id, model: model, options: options, generation: c.relaunches)
 
 proc send*(a: Agent, message: UserMessage, options = SendOptions(),
            idempotencyKey = ""): Future[Run] {.async.} =
   ## Sends a user message and returns the live `Run` stream.
+  await a.ensureLoaded()
   let s = await a.client.sendRaw(a.id, message, options, idempotencyKey)
   result = newRun(a.client, a.id, s)
 
@@ -61,21 +78,24 @@ proc runs*(a: Agent, options = ListRunsOptions()): Future[Page[RunSnapshot]] =
   if o.cwd.len == 0: o.cwd = a.cwd
   a.client.listRuns(a.id, o)
 
+proc cancelNonTerminalRuns*(a: Agent) {.async.} =
+  ## Cancels every run of this agent that is not terminal.
+  var cursor = ""
+  while true:
+    let page = await a.runs(ListRunsOptions(cursor: cursor))
+    for r in page.items:
+      if not r.status.isTerminal:
+        try: await a.client.cancelRun(r.runId, a.id)
+        except RunNotCancellableError: discard   # became terminal meanwhile
+    cursor = page.nextCursor
+    if cursor.len == 0: break
+
 proc delete*(a: Agent, force = false) {.async.} =
   ## Permanently deletes the agent and its durable data. The bridge refuses
   ## to delete an agent whose active run is not terminal; with `force`,
   ## every non-terminal run is cancelled first (see "Notes on this bridge
   ## release" in the README).
-  if force:
-    var cursor = ""
-    while true:
-      let page = await a.runs(ListRunsOptions(cursor: cursor))
-      for r in page.items:
-        if not r.status.isTerminal:
-          try: await a.client.cancelRun(r.runId, a.id)
-          except RunNotCancellableError: discard   # became terminal meanwhile
-      cursor = page.nextCursor
-      if cursor.len == 0: break
+  if force: await a.cancelNonTerminalRuns()
   await a.client.deleteAgent(a.id, a.cwd)
 proc messages*(a: Agent, options = ListAgentMessagesOptions()): Future[seq[AgentMessage]] =
   var o = options
