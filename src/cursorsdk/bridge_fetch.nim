@@ -6,7 +6,8 @@
 ## 2. The per-version user cache (`getCacheDir("cursorsdk")/<version>/bin/`).
 ## 3. Download the standalone archive for this platform from the pinned
 ##    GitHub release, verify it against the release's `SHA256SUMS.txt`, and
-##    extract it into the cache.
+##    extract it into the cache. Other releases cached alongside it are
+##    then removed (`pruneBridgeReleases`).
 ##
 ## Downloads shell out to `curl` and extraction to `tar`, both of which ship
 ## with macOS, Windows 10+, and virtually every Linux distribution. This
@@ -114,11 +115,48 @@ proc verifyManifest(dir: string) =
   if sdkVersion.isNil or sdkVersion.getStr != BridgeVersion:
     raise bridgeError("bridge manifest sdkVersion is " & $sdkVersion & ", expected " & BridgeVersion)
 
+proc isBridgeReleaseDir(path: string): bool =
+  ## True for a directory laid out by `fetchBridge`: its `manifest.json`
+  ## names the release the directory is named after.
+  let manifestPath = path / "manifest.json"
+  if not fileExists(manifestPath): return false
+  try:
+    let manifest = parseJson(readFile(manifestPath))
+    result = manifest.kind == JObject and
+             manifest.getOrDefault("sdkVersion").getStr == lastPathPart(path)
+  except CatchableError:
+    result = false
+
+proc pruneBridgeReleases*(keepDir: string, log: proc(msg: string) {.gcsafe.} = nil) =
+  ## Removes every other bridge release cached next to `keepDir` (its
+  ## sibling directories that `isBridgeReleaseDir` recognises). Anything
+  ## else in the parent directory, including in-progress `.download`
+  ## directories and symlinks, is left alone. Best-effort: a release that
+  ## cannot be removed (on Windows, one whose bridge is still running) is
+  ## logged and retried on the next download.
+  let keep = absolutePath(keepDir).normalizedPath
+  let keepName = lastPathPart(keep)
+  let parent = parentDir(keep)
+  if parent.len == 0 or not dirExists(parent): return
+  for kind, path in walkDir(parent):
+    if kind != pcDir or lastPathPart(path) == keepName: continue
+    if not isBridgeReleaseDir(path): continue
+    try:
+      # Executable first: on Windows a running one cannot be deleted, and
+      # failing here keeps `manifest.json` so the next prune recognises it.
+      let exe = cachedBridgePath(path)
+      if fileExists(exe): removeFile(exe)
+      removeDir(path)
+      if log != nil: log("removed old bridge release " & path)
+    except CatchableError as e:
+      if log != nil: log("could not remove old bridge release " & path & ": " & e.msg)
+
 proc fetchBridge*(dir = defaultBridgeDir(), force = false,
-                  log: proc(msg: string) {.gcsafe.} = nil): string =
+                  log: proc(msg: string) {.gcsafe.} = nil, prune = true): string =
   ## Downloads, verifies, and extracts the pinned bridge release into `dir`.
   ## Returns the executable path. No-op if it is already present unless
-  ## `force` is set.
+  ## `force` is set. After a successful download, `prune` removes the other
+  ## releases cached next to `dir` (`pruneBridgeReleases`).
   let exe = cachedBridgePath(dir)
   if fileExists(exe) and not force:
     return exe
@@ -149,6 +187,7 @@ proc fetchBridge*(dir = defaultBridgeDir(), force = false,
   moveDir(staging, dir)
   if not fileExists(exe):
     raise bridgeError("bridge executable missing after extraction: " & exe)
+  if prune: pruneBridgeReleases(dir, log)
   exe
 
 proc locateBridge*(allowDownload = true, log: proc(msg: string) {.gcsafe.} = nil): string =

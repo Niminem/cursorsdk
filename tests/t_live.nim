@@ -58,6 +58,11 @@ else:
     o.verbose = verbose
     if verbose:
       o.onBridgeOutput = proc(line: string) {.gcsafe.} = stderr.writeLine("[bridge] " & line)
+    o.onBridgeRelaunch = proc(exitCode: int, tail: string) {.gcsafe.} =
+      echo "  !! main bridge exited (code ", exitCode, "); relaunching"
+      echo "  --- bridge output tail ---"
+      echo tail
+      echo "  --------------------------"
     let client = newClient(o)
     var modelId = getEnv("CURSOR_TEST_MODEL")
     var models: seq[SdkModel]
@@ -70,6 +75,7 @@ else:
       result = o
       result.modelCatalog = models
       result.agentLoadTimeoutMs = 15_000
+      result.onBridgeRelaunch = nil
 
     test "catalog: me and models":
       proc run() {.async.} =
@@ -480,7 +486,10 @@ else:
 
     test "shutdown":
       # A bridge that died mid-suite explains any "connection refused"
-      # failures above; print its last output and fail here too.
+      # failures above; print its last output and fail here too. One that
+      # died earlier and was relaunched (reported by `onBridgeRelaunch`
+      # above) explains `not_found` failures on agents created before it.
+      check client.relaunches == 0
       let diedEarly = client.bridge != nil and client.bridge.hasExited
       if diedEarly:
         echo "  !! bridge exited early with code ", client.bridge.exitCode

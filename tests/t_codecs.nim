@@ -1,9 +1,10 @@
 ## Unit tests for the pure codecs: SHA-256, protobuf wire format, Struct,
 ## SdkErrorDetails, Connect error mapping, discovery line, timestamps,
-## stream envelopes, and request serialization. No network, no bridge.
+## stream envelopes, request serialization, and bridge cache pruning. No
+## network, no bridge.
 
-import std/[unittest, json, options, times, tables, strutils, base64]
-import cursorsdk/[sha256, protobuf, errors, bridge, types]
+import std/[unittest, json, options, times, tables, strutils, base64, os]
+import cursorsdk/[sha256, protobuf, errors, bridge, types, bridge_fetch]
 
 suite "sha256":
   test "known answers":
@@ -226,3 +227,33 @@ suite "types":
     check info.cwd == "/repo"
     check info.status == aisFinished
     check info.createdAt.isSome
+
+suite "bridge cache":
+  test "pruneBridgeReleases removes only other cached releases":
+    let root = getTempDir() / "cursorsdk-prune-test"
+    removeDir(root)
+    defer: removeDir(root)
+    proc release(name, sdkVersion: string, withExe = true) =
+      createDir(root / name / "bin")
+      writeFile(root / name / "manifest.json", $(%*{"sdkVersion": sdkVersion}))
+      if withExe: writeFile(cachedBridgePath(root / name), "exe")
+    release("1.0.38", "1.0.38")
+    release("1.0.35", "1.0.35")
+    release("1.0.36", "1.0.36", withExe = false)
+    release("1.0.34", "9.9.9")                       # manifest disagrees with the name
+    createDir(root / "1.0.33")
+    writeFile(root / "1.0.33" / "manifest.json", "not json")
+    createDir(root / "1.0.37.download")              # another process mid-download
+    createDir(root / "notes")
+    writeFile(root / "1.0.30", "a file, not a release")
+    pruneBridgeReleases(root / "1.0.38" & DirSep)   # trailing separator is fine
+    check fileExists(cachedBridgePath(root / "1.0.38"))
+    check not dirExists(root / "1.0.35")
+    check not dirExists(root / "1.0.36")
+    check dirExists(root / "1.0.34")
+    check dirExists(root / "1.0.33")
+    check dirExists(root / "1.0.37.download")
+    check dirExists(root / "notes")
+    check fileExists(root / "1.0.30")
+  test "pruneBridgeReleases tolerates a missing cache":
+    pruneBridgeReleases(getTempDir() / "cursorsdk-prune-missing" / "1.0.38")

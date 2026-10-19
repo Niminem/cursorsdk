@@ -7,7 +7,7 @@ import std/[asyncdispatch, json, os, strutils, options, deques, locks, exitprocs
 import bridge_supervisor, bridge_fetch, connect, errors, version
 
 export bridge_fetch.BridgeBinEnv, bridge_fetch.locateBridge, bridge_fetch.fetchBridge,
-       bridge_fetch.defaultBridgeDir
+       bridge_fetch.defaultBridgeDir, bridge_fetch.pruneBridgeReleases
 
 const
   ReadyPrefix = "cursor-sdk-bridge ready "

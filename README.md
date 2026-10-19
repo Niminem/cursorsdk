@@ -218,6 +218,11 @@ but never sees a terminal `result`. Continue by calling `send()` again. An RPC t
 races the crash can also fail once with `TransportError` before the exit is
 noticed; the one after it relaunches.
 
+`Agent.close()` is the exception: it releases what the bridge has loaded,
+and a relaunched bridge has not loaded the agent until its next `send()`, so
+`close()` in between raises `NotFoundError`. Nothing is leaked; it is safe
+to catch and ignore.
+
 ```nim
 o.autoRelaunch = true                # default
 o.onBridgeRelaunch = proc(exitCode: int, outputTail: string) {.gcsafe.} =
@@ -481,6 +486,14 @@ Resolution order:
   release from GitHub, verify it against the release's `SHA256SUMS.txt`,
    check `manifest.json` (`protocol` is `sdk.v1`, `sdkVersion` is the
    pinned release), and extract into the cache.
+
+After a download, other releases in the cache are removed, so upgrading this
+package does not leave old binaries behind. Only directories whose
+`manifest.json` names the release they are named after are touched. On
+Windows, a release whose bridge is still running is skipped and removed on
+a later download. Two programs on one machine pinned to different releases
+will re-download each other's binary; give one of them
+`CURSOR_SDK_BRIDGE_BIN`, or call `fetchBridge(prune = false)` yourself.
 
 Downloads shell out to `curl` and extraction to `tar`; both ship with macOS,
 Windows 10+, and Linux. Compile with `-d:ssl` to download with
