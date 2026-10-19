@@ -14,4 +14,4 @@ requires "nim >= 2.2.10"
 
 # Tasks
 task fetchBridge, "Download and verify the pinned cursor-sdk-bridge binary into the user cache":
-  exec "nim r --hints:off src/cursorsdk/bridge_fetch.nim"
+  exec "nim r --hints:off -f src/cursorsdk/bridge_fetch.nim"
