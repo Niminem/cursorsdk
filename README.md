@@ -586,8 +586,8 @@ as the IDE; spend appears on the usage dashboard under the SDK tag.
 This package pins one release of `cursor/sdk-bridge`, vendored as the
 `vendor/sdk-bridge` submodule and recorded in `src/cursorsdk/version.nim`. The
 first three components of the nimble version equal the bridge release
-(`1.0.35`). Fixes to this package that do not change the bridge add a fourth
-component (`1.0.35.1`). `sdk.v1` evolves additively, so a client built
+(`1.0.38`). Fixes to this package that do not change the bridge add a fourth
+component (`1.0.38.1`). `sdk.v1` evolves additively, so a client built
 against one tag keeps working with newer bridges; gate on
 `client.hasCapability(...)` when you depend on a newer feature.
 

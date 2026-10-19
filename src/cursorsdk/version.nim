@@ -4,7 +4,7 @@
 ## first three components of the nimble package version.
 
 const
-  BridgeVersion* = "1.0.35"
+  BridgeVersion* = "1.0.38"
     ## Release tag (without the leading `v`) of cursor/sdk-bridge this
     ## package was built and verified against.
   BridgeReleaseTag* = "v" & BridgeVersion
