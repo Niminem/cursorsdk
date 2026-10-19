@@ -12,7 +12,7 @@ type
     options*: AgentOptions           ## options the agent was created/resumed with
     generation: int                  ## `client.relaunches` when the bridge last loaded this agent
 
-proc cancelNonTerminalRuns*(a: Agent): Future[void] {.async.}
+proc cancelNonTerminalRuns*(a: Agent): Future[void] {.async, gcsafe.}
 
 proc ensureLoaded(a: Agent) {.async.} =
   ## A relaunched bridge only knows agents it has loaded. `Send` needs the
@@ -78,7 +78,7 @@ proc runs*(a: Agent, options = ListRunsOptions()): Future[Page[RunSnapshot]] =
   if o.cwd.len == 0: o.cwd = a.cwd
   a.client.listRuns(a.id, o)
 
-proc cancelNonTerminalRuns*(a: Agent) {.async.} =
+proc cancelNonTerminalRuns*(a: Agent) {.async, gcsafe.} =
   ## Cancels every run of this agent that is not terminal.
   var cursor = ""
   while true:

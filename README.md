@@ -388,6 +388,22 @@ except RateLimitError as e:
 Errors the bridge does not classify (no `SdkErrorCode`, Connect code
 `internal`) surface as `InternalError`; the message still explains the cause.
 
+This package never retries an RPC; the only automatic recovery is relaunching
+a dead bridge (see "Bridge resilience"). Retry policy belongs to the
+application, which knows its latency budget and what a duplicate costs.
+Errors worth retrying with backoff are `UnavailableError`, `RateLimitError`
+and `AgentBusyError` (after `retryAfter` when present), and an
+`InternalError` with no `sdkErrorCode`, which is how bridge 1.0.35 reports a
+transient Cursor backend failure (see "Notes on this bridge release").
+`AuthError`, `PermissionError`, and `ValidationError` will fail the same way
+again. Read-only calls (`me`, `listModels`, `info`, `runs`, `getRun`, ...)
+are safe to retry. `createAgent` and `send` are not guaranteed to be:
+`idempotencyKey` only deduplicates for cloud agents, so a retry against a
+local agent can create a second agent or start a second run (the bridge
+refuses a second `Send` while a run is active, with `AgentBusyError`). Do
+not retry a `Run` stream that has already started; `run.observe()` replays
+it instead.
+
 ### Custom tools
 
 ```nim
@@ -523,6 +539,12 @@ on already-loaded agents are unaffected. From this client it surfaces as
 on a freshly spawned bridge; read from the 1.0.35 binary
 (`CloudApiClient.request` is a bare `fetch`, `localModelListCache` evicts
 only on rejection).
+- A transient failure of Cursor's backend is not reported as `unavailable`.
+When the bridge's own upstream call gets an HTTP 503 (seen on `me()`), the
+client receives Connect code `internal` with no `SdkErrorCode`, so it raises
+`InternalError` with the message `[internal] [unknown] Service Unavailable`
+rather than `UnavailableError`. The same call succeeded on retry. Observed
+once in `tests/t_bridge.nim`.
 - `--max-concurrent-agents` is advertised on the ready line but not
 enforced: a second `CreateAgent` against a limit of 1 succeeds. This
 package enforces the advertised value client-side (see
